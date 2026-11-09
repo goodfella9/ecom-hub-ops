@@ -6,6 +6,7 @@ import { pipeline } from "npm:@supabase/middleware@1";
 import { withOAuthProtectedResource, withSupabase } from "npm:@supabase/server@1";
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { z } from "npm:zod@^4.3.6";
+import { gmail, markDone, MailError, parseMessage, sendReply, syncStore } from "../_shared/gmail.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const API_VERSION = Deno.env.get("SHOPIFY_API_VERSION") ?? "2026-10";
@@ -97,7 +98,7 @@ const fail = (msg: string) => ({ ...text(msg), isError: true });
 const safe = <A,>(fn: (a: A) => Promise<any>) => async (a: A) => {
   try { return await fn(a); } catch (e) {
     console.error("tool error", e);
-    return fail(e instanceof StoreError ? e.message : `Unexpected error: ${(e as Error).message}`);
+    return fail(e instanceof StoreError || e instanceof MailError ? e.message : `Unexpected error: ${(e as Error).message}`);
   }
 };
 const STORE = z.string().describe('Store key: "cmp" Cover My Plate, "mvp" My MVP Card, "arca" Arca Gear. Call list_stores for the current list.');
@@ -110,7 +111,9 @@ function buildServer(actor: string) {
         "Ecom Hub Ops: Brian's Shopify stores (Cover My Plate, My MVP Card, Arca Gear, and any added later) through one connection, via the Shopify Admin GraphQL API. " +
         "Every tool takes a store key. Reads: shopify_query. Changes are two steps: propose_change stages a mutation with a plain-English summary; apply_change runs it. " +
         "Call apply_change only after Brian approves that summary, or when the running task's own instructions explicitly pre-approve that kind of change. " +
-        "Brian can also approve staged changes in the Hub at ecomhubops.com. If a store can't be reached, report it as a connection problem, never as zero results.",
+        "Brian can also approve staged changes in the Hub at ecomhubops.com. If a store can't be reached, report it as a connection problem, never as zero results. " +
+        "Support inbox: each store's support@ mailbox syncs into tickets. Before answering a store's customers, read that store's playbook (get_playbook) — the stores are separate companies with separate voices and policies. " +
+        "Routine replies the playbook allows: inbox_reply then inbox_done. Anything needing Brian: inbox_stage_reply (with a draft) or inbox_flag (no draft).",
     },
   );
 
@@ -206,6 +209,168 @@ function buildServer(actor: string) {
     if (store) q = q.eq("store_key", store.toLowerCase());
     const { data } = await q;
     return text(data ?? []);
+  }));
+
+  // ---------------- Support inbox ----------------
+  const TICKET = z.string().uuid().describe("Ticket id from inbox_list.");
+  const loadTicket = async (id: string) => {
+    const { data } = await admin.from("tickets").select("*, stores(name,support_email)").eq("id", id).maybeSingle();
+    if (!data) throw new StoreError("No such ticket. Call inbox_list for current ids.");
+    return data;
+  };
+
+  server.registerTool("get_playbook", {
+    description: "A store's support playbook: voice/signature, what may be sent without approval, what must go to Brian, and its policies. Each store is a different company with its own rules. ALWAYS read the store's playbook before replying to that store's customers, and never apply one store's policies to another.",
+    inputSchema: z.object({ store: STORE }),
+    annotations: { readOnlyHint: true },
+  }, safe(async ({ store }) => {
+    const { data } = await admin.from("store_playbooks").select("*").eq("store_key", store.toLowerCase()).maybeSingle();
+    if (!data) return fail(`No playbook for "${store}" yet.`);
+    return text(data);
+  }));
+
+  server.registerTool("inbox_list", {
+    description: "List support tickets (one per email thread) across all stores or one store. Default shows open work: new, needs_you, awaiting_approval. Statuses: new (customer waiting, untouched), needs_you (flagged for Brian), awaiting_approval (reply drafted, waiting for Brian in the Hub), replied (we answered last), done (filed with the Completed label).",
+    inputSchema: z.object({
+      store: STORE.optional(),
+      status: z.enum(["open", "new", "needs_you", "awaiting_approval", "replied", "done", "all"]).optional(),
+      limit: z.number().int().min(1).max(100).optional(),
+    }),
+    annotations: { readOnlyHint: true },
+  }, safe(async ({ store, status, limit }) => {
+    let q = admin.from("tickets").select("id,store_key,status,subject,customer_name,customer_email,category,order_ref,snippet,last_message_at,last_from_customer,unread,in_spam,draft_body,note")
+      .order("last_message_at", { ascending: false }).limit(limit ?? 50);
+    if (store) q = q.eq("store_key", store.toLowerCase());
+    const st = status ?? "open";
+    if (st === "open") q = q.in("status", ["new", "needs_you", "awaiting_approval"]);
+    else if (st !== "all") q = q.eq("status", st);
+    const { data } = await q;
+    const { data: sync } = await admin.from("gmail_sync_state").select("store_key,mailbox,last_sync_at,ok,detail");
+    return text({ inbox_connection: sync ?? [], tickets: (data ?? []).map((t) => ({ ...t, draft_body: t.draft_body ? "(draft waiting)" : null })) });
+  }));
+
+  server.registerTool("inbox_thread", {
+    description: "Read a ticket's full email thread (every message, oldest first, quoted history removed) plus its store's playbook. Read this before replying so you never repeat or contradict an earlier reply.",
+    inputSchema: z.object({ ticket_id: TICKET }),
+    annotations: { readOnlyHint: true },
+  }, safe(async ({ ticket_id }) => {
+    const t = await loadTicket(ticket_id);
+    const [{ data: msgs }, { data: pb }] = await Promise.all([
+      admin.from("ticket_messages").select("direction,from_addr,to_addr,subject,sent_at,body_text").eq("ticket_id", ticket_id).order("sent_at"),
+      admin.from("store_playbooks").select("*").eq("store_key", t.store_key).maybeSingle(),
+    ]);
+    return text({ ticket: { ...t, stores: undefined, store: t.stores.name, mailbox: t.stores.support_email }, messages: msgs ?? [], playbook: pb });
+  }));
+
+  server.registerTool("inbox_reply", {
+    description: "Send a reply on a ticket's thread from the store's support mailbox, right now. Use ONLY for replies the store's playbook lists as routine (auto_send), or text Brian has explicitly approved. Money, refunds, remakes, discounts, judgment calls and anything in needs_approval go through inbox_stage_reply instead. Write in that store's voice and signature.",
+    inputSchema: z.object({
+      ticket_id: TICKET,
+      body: z.string().min(2).describe("Plain-text reply, complete with greeting and signature."),
+      reason: z.string().min(3).describe("Which playbook rule makes this routine, e.g. 'order status with tracking'."),
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+  }, safe(async ({ ticket_id, body, reason }) => {
+    const t = await loadTicket(ticket_id);
+    if (t.status === "done") return fail("This ticket is already filed as done. If the customer wrote again, run inbox_sync first.");
+    const r = await sendReply(ticket_id, body, `${actor} (${reason})`);
+    return text({ sent: true, store: t.stores.name, ...r, next: "Call inbox_done if nothing else is needed on this thread." });
+  }));
+
+  server.registerTool("inbox_stage_reply", {
+    description: "Draft a reply for Brian to approve instead of sending it. It shows in the Hub inbox with your reason; Brian edits/sends with one click. Use for anything outside the playbook's routine list. Never promise a price, date, refund or outcome in a draft unless Brian supplied it.",
+    inputSchema: z.object({
+      ticket_id: TICKET,
+      body: z.string().min(2),
+      reason: z.string().min(3).describe("Why Brian needs to decide, plus your recommendation (one or two lines)."),
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: false },
+  }, safe(async ({ ticket_id, body, reason }) => {
+    await loadTicket(ticket_id);
+    await admin.from("tickets").update({ draft_body: body, draft_reason: reason, draft_by: actor, draft_at: new Date().toISOString(), status: "awaiting_approval", updated_at: new Date().toISOString() }).eq("id", ticket_id);
+    return text({ staged: true, ticket_id, next: "Waiting for Brian in the Hub inbox. Nothing was sent." });
+  }));
+
+  server.registerTool("inbox_flag", {
+    description: "Flag a ticket for Brian with no draft (e.g. track/racing questions for CMP, legal, partnership pitches, anything unsure). Leaves the email unread in the inbox.",
+    inputSchema: z.object({
+      ticket_id: TICKET,
+      note: z.string().min(3).describe("What the customer wants and your recommendation."),
+      priority: z.number().int().min(1).max(3).optional().describe("1 urgent, 2 normal (default), 3 low."),
+      category: z.string().optional(),
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: false },
+  }, safe(async ({ ticket_id, note, priority, category }) => {
+    await loadTicket(ticket_id);
+    await admin.from("tickets").update({ status: "needs_you", note, priority: priority ?? 2, ...(category ? { category } : {}), updated_at: new Date().toISOString() }).eq("id", ticket_id);
+    return text({ flagged: true, ticket_id });
+  }));
+
+  server.registerTool("inbox_done", {
+    description: "File a ticket: adds the Gmail label Completed, archives it out of the inbox and marks it read. Use after replying, or for threads needing no reply (thank-yous, notifications, newsletters, pitches Brian doesn't want). Never on flagged or awaiting-approval threads.",
+    inputSchema: z.object({ ticket_id: TICKET }),
+    annotations: { readOnlyHint: false, destructiveHint: false },
+  }, safe(async ({ ticket_id }) => {
+    const t = await loadTicket(ticket_id);
+    if (t.status === "awaiting_approval" || t.status === "needs_you") return fail(`This ticket is ${t.status}; it stays open for Brian.`);
+    await markDone(ticket_id, actor);
+    return text({ done: true, ticket_id });
+  }));
+
+  server.registerTool("inbox_sync", {
+    description: "Pull the latest mail into the Hub now (it also syncs automatically every 5 minutes). Returns per-store results; a store error means that mailbox isn't connected yet, not that it's empty.",
+    inputSchema: z.object({ store: STORE.optional() }),
+    annotations: { readOnlyHint: true },
+  }, safe(async ({ store }) => {
+    let q = admin.from("stores").select("key,support_email").eq("active", true).not("support_email", "is", null);
+    if (store) q = q.eq("key", store.toLowerCase());
+    const { data } = await q;
+    const out: Record<string, unknown> = {};
+    for (const s of data ?? []) {
+      try {
+        const n = await syncStore(s.key, s.support_email);
+        await admin.from("gmail_sync_state").upsert({ store_key: s.key, mailbox: s.support_email, last_sync_at: new Date().toISOString(), ok: true, detail: `${n} threads checked` });
+        out[s.key] = { ok: true, threads_checked: n };
+      } catch (e) {
+        await admin.from("gmail_sync_state").upsert({ store_key: s.key, mailbox: s.support_email, last_sync_at: new Date().toISOString(), ok: false, detail: (e as Error).message.slice(0, 500) });
+        out[s.key] = { ok: false, error: (e as Error).message };
+      }
+    }
+    return text(out);
+  }));
+
+  server.registerTool("inbox_sent_samples", {
+    description: "Recent replies the store's support mailbox sent (straight from Gmail's Sent folder), to learn that store's real voice before updating its playbook.",
+    inputSchema: z.object({ store: STORE, limit: z.number().int().min(1).max(40).optional() }),
+    annotations: { readOnlyHint: true },
+  }, safe(async ({ store, limit }) => {
+    const { data: s } = await admin.from("stores").select("support_email").eq("key", store.toLowerCase()).maybeSingle();
+    if (!s?.support_email) return fail("That store has no support mailbox set.");
+    const r = await gmail(s.support_email, `/messages?maxResults=${limit ?? 20}&q=${encodeURIComponent("in:sent newer_than:180d")}`);
+    const out = [];
+    for (const m of r.messages ?? []) {
+      const p = parseMessage(await gmail(s.support_email, `/messages/${m.id}?format=full`));
+      out.push({ to: p.to, subject: p.subject, sent_at: p.sentAt, body: p.body.slice(0, 2000) });
+    }
+    return text(out);
+  }));
+
+  server.registerTool("update_playbook", {
+    description: "Change a store's support playbook. Only when Brian asks for a rule change, or to save a voice profile learned from inbox_sent_samples after showing Brian the summary. Sections: signer, voice, auto_send, needs_approval, policies, notes.",
+    inputSchema: z.object({
+      store: STORE,
+      section: z.enum(["signer", "voice", "auto_send", "needs_approval", "policies", "notes"]),
+      text: z.string().min(1),
+      mode: z.enum(["replace", "append"]).optional().describe("append (default) adds a line; replace rewrites the section."),
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: false },
+  }, safe(async ({ store, section, text: t, mode }) => {
+    const { data: pb } = await admin.from("store_playbooks").select("*").eq("store_key", store.toLowerCase()).maybeSingle();
+    if (!pb) return fail(`No playbook for "${store}".`);
+    const next = mode === "replace" ? t : [pb[section], t].filter(Boolean).join("\n");
+    await admin.from("store_playbooks").update({ [section]: next, version: pb.version + 1, updated_by: actor, updated_at: new Date().toISOString() }).eq("store_key", pb.store_key);
+    await admin.from("audit_log").insert({ store_key: pb.store_key, actor, action: "playbook_update", summary: `${section}: ${t.slice(0, 200)}`, status: "applied" });
+    return text({ updated: section, store: pb.store_key, version: pb.version + 1 });
   }));
 
   return server;

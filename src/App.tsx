@@ -5,6 +5,8 @@ import Overview from "./Overview";
 import Stores from "./Stores";
 import Changes from "./Changes";
 import Waitlist from "./Waitlist";
+import Inbox from "./Inbox";
+import Playbooks from "./Playbooks";
 
 export function navigate(path: string) {
   history.pushState(null, "", path);
@@ -55,13 +57,14 @@ const NAV = [
   { path: "/", label: "Overview" },
   { path: "/changes", label: "Approvals" },
   { path: "/stores", label: "Stores" },
+  { path: "/inbox", label: "Support inbox" },
+  { path: "/playbooks", label: "Playbooks" },
   { path: "/waitlist", label: "Waitlist" },
-  { path: "#", label: "Support inbox", soon: "PHASE 2" },
   { path: "#", label: "Reviews", soon: "PHASE 3" },
   { path: "#", label: "Custom hubs", soon: "PHASE 4" },
 ];
 
-function Shell({ path, session, children, pending, waitlist }: { path: string; session: Session; children: ReactNode; pending: number; waitlist: number }) {
+function Shell({ path, session, children, pending, waitlist, inbox }: { path: string; session: Session; children: ReactNode; pending: number; waitlist: number; inbox: number }) {
   return (
     <>
       <div className="scan" aria-hidden="true" />
@@ -73,7 +76,7 @@ function Shell({ path, session, children, pending, waitlist }: { path: string; s
               aria-current={path === n.path ? "page" : undefined}
               onClick={(e) => { e.preventDefault(); if (!n.soon) navigate(n.path); }}>
               <span className="tick" />{n.label}
-              <span className="badge">{n.soon ?? (n.path === "/changes" && pending ? pending : n.path === "/waitlist" && waitlist ? waitlist : "")}</span>
+              <span className="badge">{n.soon ?? (n.path === "/changes" && pending ? pending : n.path === "/inbox" && inbox ? inbox : n.path === "/waitlist" && waitlist ? waitlist : "")}</span>
             </a>
           ))}
         </nav>
@@ -160,9 +163,11 @@ export default function App() {
   const [session, setSession] = useState<Session | null | undefined>(undefined);
   const [pending, setPending] = useState(0);
   const [waitlist, setWaitlist] = useState(0);
+  const [inbox, setInbox] = useState(0);
   useEffect(() => {
     if (!session) return;
     supabase.from("waitlist").select("id", { count: "exact", head: true }).then(({ count }) => setWaitlist(count ?? 0));
+    supabase.from("tickets").select("id", { count: "exact", head: true }).in("status", ["needs_you", "awaiting_approval"]).then(({ count }) => setInbox(count ?? 0));
   }, [session]);
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
@@ -177,8 +182,8 @@ export default function App() {
   if (path === "/oauth/consent") return <Consent session={session} />;
 
   return (
-    <Shell path={path} session={session} pending={pending} waitlist={waitlist}>
-      {path === "/stores" ? <Stores /> : path === "/waitlist" ? <Waitlist onCount={setWaitlist} /> : path === "/changes" ? <Changes onCount={setPending} /> : <Overview onPending={setPending} />}
+    <Shell path={path} session={session} pending={pending} waitlist={waitlist} inbox={inbox}>
+      {path === "/stores" ? <Stores /> : path === "/inbox" ? <Inbox onCount={setInbox} /> : path === "/playbooks" ? <Playbooks /> : path === "/waitlist" ? <Waitlist onCount={setWaitlist} /> : path === "/changes" ? <Changes onCount={setPending} /> : <Overview onPending={setPending} />}
     </Shell>
   );
 }

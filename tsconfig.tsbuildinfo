@@ -1,1 +1,1 @@
-{"root":["./src/App.tsx","./src/Changes.tsx","./src/Overview.tsx","./src/Stores.tsx","./src/Waitlist.tsx","./src/main.tsx","./src/supabase.ts"],"version":"5.9.3"}
+{"root":["./src/App.tsx","./src/Changes.tsx","./src/Inbox.tsx","./src/Overview.tsx","./src/Playbooks.tsx","./src/Stores.tsx","./src/Waitlist.tsx","./src/main.tsx","./src/supabase.ts"],"version":"5.9.3"}

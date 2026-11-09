@@ -92,3 +92,24 @@ code, .mono { font-family: var(--mono); font-size: 12px; }
 .copy code { padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: rgba(56,214,255,0.04); word-break: break-all; }
 .foot { font: 11px var(--mono); color: var(--dim); letter-spacing: 1px; }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+/* ---------- Support inbox ---------- */
+.field textarea { padding: 11px 12px; border-radius: 6px; border: 1px solid var(--line-strong); background: rgba(56,214,255,0.04); color: var(--text); font: 14px/1.5 var(--body); resize: vertical; }
+.inbox { display: grid; grid-template-columns: minmax(260px, 380px) 1fr; gap: 16px; align-items: start; }
+.inbox-list { display: flex; flex-direction: column; gap: 6px; max-height: 74vh; overflow-y: auto; padding: 10px; }
+.ticket { all: unset; box-sizing: border-box; display: flex; flex-direction: column; gap: 3px; padding: 10px 12px; border-radius: 8px; border: 1px solid transparent; cursor: pointer; }
+.ticket:hover { background: rgba(56,214,255,0.06); }
+.ticket.on { background: rgba(56,214,255,0.12); border-color: var(--line-strong); }
+.ticket:focus-visible { outline: 2px solid var(--gold); }
+.ticket .tag { margin-left: 0; padding: 1px 6px; border: 1px solid; border-radius: 4px; }
+.t-from { font-weight: 500; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.t-from.unread { color: var(--text); font-weight: 700; }
+.t-subj { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.t-snip { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.inbox-thread { min-height: 300px; }
+.msgs { display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px; }
+.msg { padding: 12px 14px; border-radius: 8px; border: 1px solid var(--line); max-width: 92%; }
+.msg.in { background: rgba(56,214,255,0.05); align-self: flex-start; }
+.msg.out { background: rgba(255,194,74,0.07); border-color: rgba(255,194,74,0.35); align-self: flex-end; }
+.msg-body { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 6px; }
+@media (max-width: 860px) { .inbox { grid-template-columns: 1fr; } .inbox-list { max-height: 45vh; } .msg { max-width: 100%; } }
