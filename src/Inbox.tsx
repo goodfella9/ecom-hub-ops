@@ -35,6 +35,8 @@ export default function Inbox({ onCount }: { onCount: (n: number) => void }) {
   const [sync, setSync] = useState<Sync[]>([]);
   const [filter, setFilter] = useState("open");
   const [store, setStore] = useState("all");
+  const [showSystem, setShowSystem] = useState(false);
+  const [systemCount, setSystemCount] = useState(0);
   const [sel, setSel] = useState<string | null>(null);
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [draft, setDraft] = useState("");
@@ -45,12 +47,16 @@ export default function Inbox({ onCount }: { onCount: (n: number) => void }) {
     const st = FILTERS.find((f) => f.k === filter)!.st;
     let q = supabase.from("tickets").select("*").in("status", st).order("priority").order("last_message_at", { ascending: false }).limit(300);
     if (store !== "all") q = q.eq("store_key", store);
-    const [{ data }, { data: s }, { count }] = await Promise.all([
+    if (!showSystem) q = q.or("category.is.null,category.neq.notification");
+    let sq = supabase.from("tickets").select("id", { count: "exact", head: true }).eq("category", "notification").in("status", st);
+    if (store !== "all") sq = sq.eq("store_key", store);
+    const [{ data }, { data: s }, { count }, { count: sys }] = await Promise.all([
       q, supabase.from("gmail_sync_state").select("*"),
       supabase.from("tickets").select("id", { count: "exact", head: true }).in("status", ["needs_you", "awaiting_approval"]),
+      sq,
     ]);
-    setTickets(data ?? []); setSync(s ?? []); onCount(count ?? 0);
-  }, [filter, store, onCount]);
+    setTickets(data ?? []); setSync(s ?? []); onCount(count ?? 0); setSystemCount(sys ?? 0);
+  }, [filter, store, showSystem, onCount]);
   useEffect(() => { load(); const t = setInterval(load, 30_000); return () => clearInterval(t); }, [load]);
 
   const cur = useMemo(() => tickets.find((t) => t.id === sel) ?? null, [tickets, sel]);
@@ -101,6 +107,7 @@ export default function Inbox({ onCount }: { onCount: (n: number) => void }) {
 
       <div className="row" role="toolbar" aria-label="Filters" style={{ flexWrap: "wrap" }}>
         {FILTERS.map((f) => <button key={f.k} className={`btn chip ${filter === f.k ? "on" : ""}`} onClick={() => { setFilter(f.k); setSel(null); }}>{f.label}</button>)}
+        <button className={`btn chip ${showSystem ? "on" : ""}`} onClick={() => setShowSystem(!showSystem)} aria-pressed={showSystem}>SYSTEM MAIL {systemCount ? `(${systemCount})` : ""}</button>
         <span className="spacer" />
         {["all", "cmp", "arca", "mvp"].map((k) => <button key={k} className={`btn chip ${store === k ? "on" : ""}`} onClick={() => { setStore(k); setSel(null); }}>{k === "all" ? "ALL STORES" : k.toUpperCase()}</button>)}
       </div>
@@ -116,7 +123,7 @@ export default function Inbox({ onCount }: { onCount: (n: number) => void }) {
                   <span className="tag" style={{ color: st.col, borderColor: st.col }}>{st.label}</span>
                   <span className="sub mono">{t.store_key.toUpperCase()} · {ago(t.last_message_at)}</span>
                 </div>
-                <div className={`t-from ${t.unread ? "unread" : ""}`}>{t.customer_name || t.customer_email}{t.in_spam ? " · SPAM" : ""}{t.category === "sms" ? " · TEXT" : ""}</div>
+                <div className={`t-from ${t.unread ? "unread" : ""}`}>{t.customer_name || t.customer_email}{t.in_spam ? " · SPAM" : ""}{t.category === "sms" ? " · TEXT" : ""}{t.category === "notification" ? " · SYSTEM" : ""}</div>
                 <div className="t-subj">{t.subject}{t.order_ref ? ` · #${t.order_ref}` : ""}</div>
                 <div className="sub t-snip">{t.note || t.draft_reason || t.snippet}</div>
               </button>

@@ -25,9 +25,9 @@ Deno.serve(async (req) => {
   const out: Record<string, unknown> = {};
   for (const s of stores ?? []) {
     try {
-      const n = await syncStore(s.key, s.support_email);
-      await admin.from("gmail_sync_state").upsert({ store_key: s.key, mailbox: s.support_email, last_sync_at: new Date().toISOString(), ok: true, detail: `${n} threads checked` });
-      out[s.key] = { ok: true, threads: n };
+      const r = await syncStore(s.key, s.support_email, 4, only ? 120_000 : 40_000);
+      await admin.from("gmail_sync_state").upsert({ store_key: s.key, mailbox: s.support_email, last_sync_at: new Date().toISOString(), ok: true, detail: `${r.checked} threads watched, ${r.updated} updated${r.pending ? `, ${r.pending} still loading` : ""}` });
+      out[s.key] = { ok: true, ...r };
     } catch (e) {
       const msg = (e as Error).message;
       await admin.from("gmail_sync_state").upsert({ store_key: s.key, mailbox: s.support_email, last_sync_at: new Date().toISOString(), ok: false, detail: msg.slice(0, 500) });

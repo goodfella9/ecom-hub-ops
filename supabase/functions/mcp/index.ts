@@ -235,18 +235,23 @@ function buildServer(actor: string) {
       store: STORE.optional(),
       status: z.enum(["open", "new", "needs_you", "awaiting_approval", "replied", "done", "all"]).optional(),
       limit: z.number().int().min(1).max(100).optional(),
+      include_notifications: z.boolean().optional().describe("Also list system mail (Shopify/ad/shipping notifications, no-reply senders). Off by default; file those with inbox_done in bulk when the playbook says to."),
     }),
     annotations: { readOnlyHint: true },
-  }, safe(async ({ store, status, limit }) => {
+  }, safe(async ({ store, status, limit, include_notifications }) => {
     let q = admin.from("tickets").select("id,store_key,status,subject,customer_name,customer_email,category,order_ref,snippet,last_message_at,last_from_customer,unread,in_spam,draft_body,note")
       .order("last_message_at", { ascending: false }).limit(limit ?? 50);
     if (store) q = q.eq("store_key", store.toLowerCase());
     const st = status ?? "open";
     if (st === "open") q = q.in("status", ["new", "needs_you", "awaiting_approval"]);
     else if (st !== "all") q = q.eq("status", st);
+    if (!include_notifications) q = q.or("category.is.null,category.neq.notification");
     const { data } = await q;
+    let nq = admin.from("tickets").select("id", { count: "exact", head: true }).eq("category", "notification").neq("status", "done");
+    if (store) nq = nq.eq("store_key", store.toLowerCase());
+    const { count: notices } = await nq;
     const { data: sync } = await admin.from("gmail_sync_state").select("store_key,mailbox,last_sync_at,ok,detail");
-    return text({ inbox_connection: sync ?? [], tickets: (data ?? []).map((t) => ({ ...t, draft_body: t.draft_body ? "(draft waiting)" : null })) });
+    return text({ inbox_connection: sync ?? [], unfiled_notifications: notices ?? 0, tickets: (data ?? []).map((t) => ({ ...t, draft_body: t.draft_body ? "(draft waiting)" : null })) });
   }));
 
   server.registerTool("inbox_thread", {
@@ -328,9 +333,9 @@ function buildServer(actor: string) {
     const out: Record<string, unknown> = {};
     for (const s of data ?? []) {
       try {
-        const n = await syncStore(s.key, s.support_email);
-        await admin.from("gmail_sync_state").upsert({ store_key: s.key, mailbox: s.support_email, last_sync_at: new Date().toISOString(), ok: true, detail: `${n} threads checked` });
-        out[s.key] = { ok: true, threads_checked: n };
+        const r = await syncStore(s.key, s.support_email, 4, 35_000);
+        await admin.from("gmail_sync_state").upsert({ store_key: s.key, mailbox: s.support_email, last_sync_at: new Date().toISOString(), ok: true, detail: `${r.checked} threads watched, ${r.updated} updated${r.pending ? `, ${r.pending} still loading` : ""}` });
+        out[s.key] = { ok: true, ...r };
       } catch (e) {
         await admin.from("gmail_sync_state").upsert({ store_key: s.key, mailbox: s.support_email, last_sync_at: new Date().toISOString(), ok: false, detail: (e as Error).message.slice(0, 500) });
         out[s.key] = { ok: false, error: (e as Error).message };

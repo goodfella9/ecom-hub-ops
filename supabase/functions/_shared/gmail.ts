@@ -122,7 +122,15 @@ function realCustomer(from: string, body: string) {
   return { email: a, name: nameOf(from), via: a.endsWith("txt.voice.google.com") ? "sms" : "email" };
 }
 
-const ORDER_RE = /(?:order|#)\s*#?\s*(\d{4,6})\b/i;
+// System mail (store notifications, ad platforms, shipping software, no-reply senders) — never a customer.
+const NOTICE_DOMAINS = /(^|\.)(shopifyemail\.com|shopify\.com|google\.com|googlemail\.com|shipstation\.com|shipengine\.com|microsoftadvertising\.com|facebookmail\.com|meta\.com|apple\.com|windsor\.ai|stripe\.com|paypal\.com|klaviyo\.com|amazon\.com|tiktok\.com|ups\.com|usps\.com|vercel\.com|supabase\.(io|com)|github\.com|intuit\.com|resend\.(dev|com))$/i;
+export const isNotification = (email: string) => {
+  if (email === "mailer@shopify.com") return false; // Shopify contact form we couldn't parse: keep it visible
+  const [local, domain = ""] = email.split("@");
+  return NOTICE_DOMAINS.test(domain) || /^(no-?reply|do-?not-?reply|notifications?|mailer-daemon|alerts?|bounce)/i.test(local);
+};
+
+const ORDER_RE =/(?:order|#)\s*#?\s*(\d{4,6})\b/i;
 
 // ---------- sync ----------
 export async function completedLabel(store_key: string, mailbox: string): Promise<string> {
@@ -155,11 +163,13 @@ export async function syncThread(store_key: string, mailbox: string, threadId: s
   if (!lastFromCustomer && status !== "done" && status !== "awaiting_approval") status = "replied";
   if (!inInbox && !inSpam && status !== "done" && !lastFromCustomer) status = "done";
 
+  const notice = cust.via === "email" && isNotification(cust.email);
   const row = {
-    store_key, gmail_thread_id: threadId, subject: firstIn.subject || "(no subject)",
+    store_key, gmail_thread_id: threadId, gmail_history_id: String(t.historyId ?? ""), subject: firstIn.subject || "(no subject)",
     customer_email: cust.email, customer_name: cust.name, snippet: (last.body || t.snippet || "").slice(0, 280),
     status, order_ref: order, last_message_at: last.sentAt, last_from_customer: lastFromCustomer, unread, in_spam: inSpam,
-    updated_at: new Date().toISOString(), ...(cust.via !== "email" ? { category: cust.via } : {}),
+    updated_at: new Date().toISOString(),
+    ...(cust.via !== "email" ? { category: cust.via } : notice ? { category: "notification", priority: 3 } : {}),
   };
   const { data: tk, error } = await admin.from("tickets").upsert(row, { onConflict: "store_key,gmail_thread_id" }).select("id").single();
   if (error) throw new MailError(`Hub database error: ${error.message}`);
@@ -170,28 +180,35 @@ export async function syncThread(store_key: string, mailbox: string, threadId: s
   return tk.id as string;
 }
 
-export async function syncStore(store_key: string, mailbox: string, days = 4) {
-  const seen = new Set<string>();
-  let count = 0;
-  for (const [q, spam] of [[`in:inbox newer_than:${days}d`, false], [`is:unread in:inbox`, false], [`in:spam newer_than:${days}d`, true]] as const) {
+// Only threads whose Gmail historyId changed are re-read, and each run stops after `budgetMs`
+// (the next run picks up the rest), so a big inbox never times the function out.
+export async function syncStore(store_key: string, mailbox: string, days = 4, budgetMs = 110_000) {
+  const t0 = Date.now();
+  const listed = new Map<string, { hid: string; spam: boolean }>();
+  for (const [q, spam] of [[`in:inbox newer_than:${days}d`, false], [`is:unread in:inbox newer_than:30d`, false], [`in:spam newer_than:${days}d`, true]] as const) {
     let pageToken = "";
     for (let i = 0; i < 4; i++) {
-      const r = await gmail(mailbox, `/threads?maxResults=50&q=${encodeURIComponent(q)}${spam ? "&includeSpamTrash=true" : ""}${pageToken ? `&pageToken=${pageToken}` : ""}`);
-      for (const th of r.threads ?? []) {
-        if (seen.has(th.id)) continue;
-        seen.add(th.id);
-        await syncThread(store_key, mailbox, th.id, spam);
-        count++;
-      }
+      const r = await gmail(mailbox, `/threads?maxResults=100&q=${encodeURIComponent(q)}${spam ? "&includeSpamTrash=true" : ""}${pageToken ? `&pageToken=${pageToken}` : ""}`);
+      for (const th of r.threads ?? []) if (!listed.has(th.id)) listed.set(th.id, { hid: th.historyId, spam });
       if (!r.nextPageToken) break;
       pageToken = r.nextPageToken;
     }
   }
-  // Tickets still open in the Hub but archived/labelled in Gmail by someone else: refresh them too.
-  const { data: open } = await admin.from("tickets").select("gmail_thread_id").eq("store_key", store_key).neq("status", "done").limit(200);
-  for (const o of open ?? []) if (!seen.has(o.gmail_thread_id)) { try { await syncThread(store_key, mailbox, o.gmail_thread_id); } catch { /* deleted thread */ } }
+  // Open Hub tickets that dropped out of those searches (archived/labelled by someone in Gmail) get refreshed too.
+  const { data: known } = await admin.from("tickets").select("gmail_thread_id,gmail_history_id,status").eq("store_key", store_key);
+  const knownMap = new Map((known ?? []).map((k) => [k.gmail_thread_id, k]));
+  for (const k of known ?? []) if (k.status !== "done" && !listed.has(k.gmail_thread_id)) listed.set(k.gmail_thread_id, { hid: "", spam: false });
+
+  let updated = 0, pending = 0;
+  for (const [id, { hid, spam }] of listed) {
+    const k = knownMap.get(id);
+    if (k && hid && k.gmail_history_id === hid) continue;
+    if (Date.now() - t0 > budgetMs) { pending++; continue; }
+    try { await syncThread(store_key, mailbox, id, spam); updated++; }
+    catch (e) { if (!/HTTP 404/.test((e as Error).message)) throw e; }
+  }
   await completedLabel(store_key, mailbox);
-  return count;
+  return { checked: listed.size, updated, pending };
 }
 
 // ---------- actions ----------
