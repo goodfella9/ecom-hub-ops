@@ -125,7 +125,6 @@ function realCustomer(from: string, body: string) {
 // System mail (store notifications, ad platforms, shipping software, no-reply senders) — never a customer.
 const NOTICE_DOMAINS = /(^|\.)(shopifyemail\.com|shopify\.com|google\.com|googlemail\.com|shipstation\.com|shipengine\.com|microsoftadvertising\.com|facebookmail\.com|meta\.com|apple\.com|windsor\.ai|stripe\.com|paypal\.com|klaviyo\.com|amazon\.com|tiktok\.com|ups\.com|usps\.com|vercel\.com|supabase\.(io|com)|github\.com|intuit\.com|resend\.(dev|com))$/i;
 export const isNotification = (email: string) => {
-  if (email === "mailer@shopify.com") return false; // Shopify contact form we couldn't parse: keep it visible
   const [local, domain = ""] = email.split("@");
   return NOTICE_DOMAINS.test(domain) || /^(no-?reply|do-?not-?reply|notifications?|mailer-daemon|alerts?|bounce)/i.test(local);
 };
@@ -147,7 +146,9 @@ export async function syncThread(store_key: string, mailbox: string, threadId: s
   const t = await gmail(mailbox, `/threads/${threadId}?format=full`);
   const msgs = (t.messages ?? []).map(parseMessage).filter((m: any) => !m.labels.includes("DRAFT"));
   if (!msgs.length) return null;
-  const mine = (m: any) => addr(m.from) === mailbox.toLowerCase();
+  // Anyone at the store's own domain (support@, brian@, ...) counts as staff, not the customer.
+  const domain = mailbox.toLowerCase().split("@")[1];
+  const mine = (m: any) => addr(m.from).split("@")[1] === domain;
   const firstIn = msgs.find((m: any) => !mine(m)) ?? msgs[0];
   const last = msgs[msgs.length - 1];
   const cust = realCustomer(firstIn.from, firstIn.fullBody);

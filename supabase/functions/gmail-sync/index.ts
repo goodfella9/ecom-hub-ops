@@ -2,7 +2,7 @@
 // Runs every 5 minutes from pg_cron (header x-hub-cron must match hub_secrets.cron), or on demand by a signed-in admin.
 // GET ?whoami=1 returns only the service account's public client ID (needed for domain-wide delegation).
 import { admin, CORS, json, requireAdmin } from "../_shared/hub.ts";
-import { saIdentity, syncStore } from "../_shared/gmail.ts";
+import { markDone, saIdentity, sendReply, syncStore } from "../_shared/gmail.ts";
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: CORS });
@@ -18,7 +18,39 @@ Deno.serve(async (req) => {
     const who = await requireAdmin(req);
     if (who instanceof Response) return who;
   }
+  // Internal actions (cron-secret only): used by Claude's inbox passes when the connector isn't loaded.
+  if (cron && req.method === "POST") {
+    const b = await req.clone().json().catch(() => ({}));
+    if (b.action) {
+      try {
+        if (b.action === "reply") return json({ ok: true, ...(await sendReply(b.ticket_id, String(b.body), `claude:inbox-pass (${b.reason ?? "routine"})`)) });
+        if (b.action === "done") { await markDone(b.ticket_id, "claude:inbox-pass"); return json({ ok: true }); }
+        if (b.action === "stage") {
+          await admin.from("tickets").update({ draft_body: b.body, draft_reason: b.reason, draft_by: "claude:inbox-pass", draft_at: new Date().toISOString(), status: "awaiting_approval", updated_at: new Date().toISOString() }).eq("id", b.ticket_id);
+          return json({ ok: true });
+        }
+        if (b.action === "flag") {
+          await admin.from("tickets").update({ status: "needs_you", note: b.note, priority: b.priority ?? 2, updated_at: new Date().toISOString() }).eq("id", b.ticket_id);
+          return json({ ok: true });
+        }
+        return json({ error: "unknown action" }, 400);
+      } catch (e) { return json({ ok: false, error: (e as Error).message }, 500); }
+    }
+  }
   const only = url.searchParams.get("store");
+  // Bulk clean-up Brian asked for: file (Completed label + archive) every open ticket in one store whose last message is older than a date.
+  const before = url.searchParams.get("archive_before");
+  if (before && only) {
+    const t0 = Date.now();
+    const { data: old } = await admin.from("tickets").select("id").eq("store_key", only).neq("status", "done").lt("last_message_at", new Date(before).toISOString()).limit(400);
+    let filed = 0, left = 0;
+    for (const t of old ?? []) {
+      if (Date.now() - t0 > 120_000) { left++; continue; }
+      await markDone(t.id, "hub:bulk-archive (Brian: older than 30 days, handled by phone)");
+      filed++;
+    }
+    return json({ store: only, filed, left });
+  }
   let q = admin.from("stores").select("key,support_email").eq("active", true).not("support_email", "is", null);
   if (only) q = q.eq("key", only);
   const { data: stores } = await q;
