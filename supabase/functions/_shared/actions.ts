@@ -19,6 +19,8 @@ export type Action = {
   restock?: boolean;
   title?: string; // upgrade_shipping: new shipping method name as ShipStation should see it, e.g. "UPS 2nd Day Air"
   extra?: number; // upgrade_shipping: amount the customer pays on top of what they already paid for shipping
+  shipping?: number; // invoice: shipping charge on the invoice (omit = free shipping)
+  digital?: boolean; // invoice: true when nothing ships (fees, upgrades)
   summary?: string;
 };
 
@@ -29,7 +31,8 @@ export function describe(a: Action): string {
     case "invoice": {
       const items = (a.items as Item[] ?? []);
       const total = items.reduce((s, i) => s + i.price * (i.qty ?? 1), 0);
-      return `Create a ${money(total)} invoice (${items.map((i) => `${i.qty && i.qty > 1 ? `${i.qty}× ` : ""}${i.title}`).join(", ")}) and email it to ${a.email}`;
+      const ship = a.digital ? "" : a.shipping ? ` + ${money(Number(a.shipping))} shipping` : " + free shipping";
+      return `Create a ${money(total)}${ship} invoice (${items.map((i) => `${i.qty && i.qty > 1 ? `${i.qty}× ` : ""}${i.title}`).join(", ")}) and email it to ${a.email}${a.digital ? "" : ". Once paid it becomes a normal order that ships"}`;
     }
     case "refund_items": {
       const items = a.items as { title: string; qty?: number }[] | undefined;
@@ -89,7 +92,8 @@ async function run(storeKey: string, a: Action): Promise<string> {
       input: {
         email: a.email,
         ...(c?.id ? { purchasingEntity: { customerId: c.id } } : {}),
-        lineItems: items.map((i) => ({ title: i.title, originalUnitPrice: Number(i.price), quantity: i.qty ?? 1, requiresShipping: false, taxable: false })),
+        lineItems: items.map((i) => ({ title: i.title, originalUnitPrice: Number(i.price), quantity: i.qty ?? 1, requiresShipping: !a.digital, ...(a.digital ? { taxable: false } : {}) })),
+        ...(a.digital ? {} : { shippingLine: { title: a.shipping ? "Shipping" : "Free shipping", priceWithCurrency: { amount: Number(a.shipping ?? 0), currencyCode: "USD" } } }),
         note: a.note ?? "Created from the Hub support inbox",
         tags: ["hub-invoice"],
       },
