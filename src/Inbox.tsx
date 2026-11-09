@@ -149,11 +149,16 @@ export default function Inbox({ onCount }: { onCount: (n: number) => void }) {
               {cur.status !== "done" && (
                 <div className="reply">
                   {cur.draft_reason && <div className="panel warm" style={{ marginBottom: 10 }}><div className="label">WHY THIS NEEDS YOU</div>{cur.draft_reason}</div>}
+                  <Blanks draft={draft} setDraft={setDraft} />
                   <label className="field"><span className="label">REPLY {cur.draft_body ? "(DRAFT BY CLAUDE — EDIT FREELY)" : ""}</span>
-                    <textarea rows={8} value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="Write a reply…" />
+                    <textarea rows={8} value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="Write a reply…"
+                      style={findBlanks(draft).length ? { borderColor: "#ff5d47", boxShadow: "0 0 0 1px #ff5d47" } : undefined} />
                   </label>
+                  {findBlanks(draft).length > 0 && <Preview draft={draft} />}
                   <div className="row" style={{ marginTop: 10, flexWrap: "wrap" }}>
-                    <button className="btn gold" disabled={!!busy || draft.trim().length < 2} onClick={() => act("send", { body: draft })}>{busy === "send" ? "SENDING…" : "APPROVE & SEND"}</button>
+                    <button className="btn gold" disabled={!!busy || draft.trim().length < 2 || findBlanks(draft).length > 0} onClick={() => act("send", { body: draft })}>
+                      {busy === "send" ? "SENDING…" : findBlanks(draft).length ? `FILL ${findBlanks(draft).length} BLANK${findBlanks(draft).length > 1 ? "S" : ""} FIRST` : "APPROVE & SEND"}
+                    </button>
                     <button className="btn" disabled={!!busy} onClick={() => act("save_draft", { body: draft })}>SAVE DRAFT</button>
                     {cur.draft_body && <button className="btn" disabled={!!busy} onClick={() => act("discard_draft")}>DISCARD DRAFT</button>}
                     <span className="spacer" />
@@ -168,5 +173,70 @@ export default function Inbox({ onCount }: { onCount: (n: number) => void }) {
         </section>
       </div>
     </>
+  );
+}
+
+// ---------- Blanks Claude leaves in drafts ----------
+// [[CHOOSE: option A || option B]] -> one-tap buttons; [[ADD: ship date]] -> a field. Old style [ADD ...] / [CHOOSE ONE: a / b] too.
+const BLANK_RE = /\[\[[^\]]+\]\]|\[(?:ADD|CHOOSE|INSERT|FILL|TBD|PICK)\b[^\]]*\]/gi;
+export const findBlanks = (s: string) => s.match(BLANK_RE) ?? [];
+function parseBlank(raw: string): { kind: "choose" | "add"; label: string; options: string[] } {
+  const inner = raw.replace(/^\[\[?|\]\]?$/g, "").trim();
+  const m = inner.match(/^(CHOOSE(?: ONE)?|PICK(?: ONE)?)\s*:?\s*([\s\S]*)$/i);
+  if (m) {
+    const parts = m[2].split(/\s*\|\|\s*|\s+\/\s+(?=[A-Z])/).map((x) => x.trim()).filter(Boolean);
+    if (parts.length > 1) return { kind: "choose", label: "Pick one", options: parts };
+  }
+  return { kind: "add", label: inner.replace(/^(ADD|INSERT|FILL|TBD)\s*:?\s*/i, "") || "Fill this in", options: [] };
+}
+
+function Blanks({ draft, setDraft }: { draft: string; setDraft: (s: string) => void }) {
+  const blanks = findBlanks(draft);
+  const [vals, setVals] = useState<Record<string, string>>({});
+  if (!blanks.length) return null;
+  const fill = (raw: string, text: string) => { if (text.trim()) setDraft(draft.replace(raw, text.trim())); };
+  return (
+    <div className="panel hot" style={{ marginBottom: 10 }} role="alert">
+      <div className="label" style={{ color: "#ff5d47" }}>FILL {blanks.length} BLANK{blanks.length > 1 ? "S" : ""} BEFORE SENDING</div>
+      {blanks.map((raw, i) => {
+        const b = parseBlank(raw);
+        return (
+          <div key={raw + i} style={{ marginTop: 10 }}>
+            <div className="sub" style={{ color: "#ff8b78" }}>{b.kind === "choose" ? "Pick one:" : `Add: ${b.label}`}</div>
+            {b.kind === "choose" ? (
+              <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6 }}>
+                {b.options.map((o) => <button key={o} className="btn" style={{ textAlign: "left", whiteSpace: "normal" }} onClick={() => fill(raw, o)}>{o}</button>)}
+              </div>
+            ) : (
+              <form className="row" style={{ marginTop: 6 }} onSubmit={(e) => { e.preventDefault(); fill(raw, vals[raw] ?? ""); }}>
+                <input style={{ flex: 1, padding: "9px 10px", borderRadius: 6, border: "1px solid #ff5d47", background: "rgba(255,93,71,0.06)", color: "inherit", font: "inherit" }}
+                  placeholder={b.label} value={vals[raw] ?? ""} onChange={(e) => setVals({ ...vals, [raw]: e.target.value })} aria-label={b.label} />
+                <button className="btn gold" disabled={!(vals[raw] ?? "").trim()}>USE</button>
+              </form>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function Preview({ draft }: { draft: string }) {
+  const parts: (string | { blank: string })[] = [];
+  let last = 0;
+  for (const m of draft.matchAll(BLANK_RE)) {
+    parts.push(draft.slice(last, m.index));
+    parts.push({ blank: m[0] });
+    last = (m.index ?? 0) + m[0].length;
+  }
+  parts.push(draft.slice(last));
+  return (
+    <div style={{ marginTop: 8 }}>
+      <div className="label">PREVIEW</div>
+      <div className="msg-body" style={{ padding: 12, border: "1px solid var(--line)", borderRadius: 8 }}>
+        {parts.map((p, i) => typeof p === "string" ? <span key={i}>{p}</span>
+          : <mark key={i} style={{ background: "rgba(255,93,71,0.2)", color: "#ff5d47", fontWeight: 700, borderRadius: 3, padding: "0 2px" }}>{p.blank}</mark>)}
+      </div>
+    </div>
   );
 }

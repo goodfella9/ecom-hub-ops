@@ -283,7 +283,7 @@ function buildServer(actor: string) {
   }));
 
   server.registerTool("inbox_stage_reply", {
-    description: "Draft a reply for Brian to approve instead of sending it. It shows in the Hub inbox with your reason; Brian edits/sends with one click. Use for anything outside the playbook's routine list. Never promise a price, date, refund or outcome in a draft unless Brian supplied it.",
+    description: "Draft a reply for Brian to approve instead of sending it. It shows in the Hub inbox with your reason; Brian edits/sends with one click. Use for anything outside the playbook's routine list. Never promise a price, date, refund or outcome in a draft unless Brian supplied it. Where Brian must decide or supply something, write a blank: [[CHOOSE: first full sentence option || second full sentence option]] (each option is complete text that replaces the blank) or [[ADD: what's needed, e.g. ship date]]. The Hub shows blanks in red with one-tap options and will not send until every blank is filled. Never use any other placeholder style.",
     inputSchema: z.object({
       ticket_id: TICKET,
       body: z.string().min(2),

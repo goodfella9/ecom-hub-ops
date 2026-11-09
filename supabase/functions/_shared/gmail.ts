@@ -213,9 +213,15 @@ export async function syncStore(store_key: string, mailbox: string, days = 4, bu
 }
 
 // ---------- actions ----------
+// Blanks Claude leaves for Brian: [[ADD: ship date]] or [[CHOOSE: option A || option B]] (old style [ADD ...] too).
+export const BLANK_RE = /\[\[[^\]]+\]\]|\[(?:ADD|CHOOSE|INSERT|FILL|TBD|PICK)\b[^\]]*\]/gi;
+export const findBlanks = (body: string) => body.match(BLANK_RE) ?? [];
+
 function rfc2047(s: string) { return /^[\x20-\x7e]*$/.test(s) ? s : `=?UTF-8?B?${btoa(String.fromCharCode(...new TextEncoder().encode(s)))}?=`; }
 
 export async function sendReply(ticketId: string, body: string, actor: string) {
+  const blanks = findBlanks(body);
+  if (blanks.length) throw new MailError(`Not sent: the reply still has ${blanks.length} blank${blanks.length > 1 ? "s" : ""} to fill in (${blanks.join(", ")}).`);
   const { data: t } = await admin.from("tickets").select("*, stores(support_email,name)").eq("id", ticketId).maybeSingle();
   if (!t) throw new MailError("No such ticket.");
   const mailbox: string = t.stores.support_email;
