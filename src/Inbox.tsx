@@ -78,7 +78,10 @@ export default function Inbox({ onCount }: { onCount: (n: number) => void }) {
   useEffect(() => { setDraft(cur?.draft_body ?? ""); setMsg(""); setChosen([]); }, [cur?.id, cur?.draft_body]);
   const actions = cur?.draft_actions ?? [];
   // Actions that will run: always-run ones + those tied to an option Brian picked (and whose text is still in the reply).
-  const willRun = actions.filter((a) => !a.when || (chosen.includes(a.id) && draft.includes(a.when)));
+  // Once every blank is filled, an option-tied action runs if its option text is in the reply (picked or typed).
+  const blanksLeft = findBlanks(draft).length;
+  const willRun = actions.filter((a) => !a.when || (!blanksLeft && draft.includes(a.when)));
+  void chosen;
   const doneIds = new Set((cur?.action_log ?? []).filter((l) => l.ok).map((l) => l.id));
 
   const act = async (action: string, extra: Record<string, unknown> = {}) => {
@@ -136,7 +139,7 @@ export default function Inbox({ onCount }: { onCount: (n: number) => void }) {
             return (
               <button key={t.id} className={`ticket ${sel === t.id ? "on" : ""}`} onClick={() => setSel(t.id)}>
                 <div className="between" style={{ gap: 8 }}>
-                  <span className="tag" style={{ color: st.col, borderColor: st.col }}>{st.label}</span>
+                  <span><span className="tag" style={{ color: st.col, borderColor: st.col }}>{st.label}</span>{(t.draft_actions ?? []).length > 0 && <span className="tag" style={{ marginLeft: 6, color: "#ffc24a", borderColor: "#ffc24a" }} title="Approving also takes action">⚡{t.draft_actions.length}</span>}</span>
                   <span className="sub mono"><b className="tno">#{t.ticket_no}</b> · {t.store_key.toUpperCase()} · {ago(t.last_message_at)}</span>
                 </div>
                 <div className={`t-from ${t.unread ? "unread" : ""}`}>{t.customer_name || t.customer_email}{t.in_spam ? " · SPAM" : ""}{t.category === "sms" ? " · TEXT" : ""}{t.category === "notification" ? " · SYSTEM" : ""}</div>
@@ -171,16 +174,17 @@ export default function Inbox({ onCount }: { onCount: (n: number) => void }) {
                       style={findBlanks(draft).length ? { borderColor: "#ff5d47", boxShadow: "0 0 0 1px #ff5d47" } : undefined} />
                   </label>
                   {findBlanks(draft).length > 0 && <Preview draft={draft} />}
+                  <div className={`panel ${willRun.length ? "warm" : ""}`} style={{ marginTop: 10 }}>
+                    <div className="label">WHAT APPROVING DOES</div>
+                    {blanksLeft > 0 && actions.some((a) => a.when) && <div className="sub" style={{ marginTop: 4 }}>Depends on the option you pick. Each option above shows what it does.</div>}
+                    <ol style={{ margin: "6px 0 0", paddingLeft: 20 }}>
+                      {willRun.map((a) => <li key={a.id}>⚡ {a.summary}{doneIds.has(a.id) ? " (already done)" : ""}</li>)}
+                      <li>✉ Send this reply to {cur.customer_email}</li>
+                    </ol>
+                    {willRun.length === 0 && blanksLeft === 0 && <div className="sub" style={{ marginTop: 6 }}>Email only. Nothing changes in Shopify and nobody else is notified.</div>}
+                    {willRun.length > 0 && <div className="sub" style={{ marginTop: 6 }}>Actions run first. If any fails, the email is not sent.</div>}
+                  </div>
                   <div className="row" style={{ marginTop: 10, flexWrap: "wrap" }}>
-                    {willRun.length > 0 && findBlanks(draft).length === 0 && (
-                    <div className="panel warm" style={{ marginTop: 10 }}>
-                      <div className="label">WHEN YOU APPROVE, THE HUB WILL FIRST:</div>
-                      <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
-                        {willRun.map((a) => <li key={a.id}>{a.summary}{doneIds.has(a.id) ? " (already done)" : ""}</li>)}
-                      </ul>
-                      <div className="sub" style={{ marginTop: 6 }}>If any step fails, the email is not sent.</div>
-                    </div>
-                  )}
                   <button className="btn gold" disabled={!!busy || draft.trim().length < 2 || findBlanks(draft).length > 0} onClick={() => act("send", { body: draft, actions: willRun.map((a) => a.id) })}>
                       {busy === "send" ? "WORKING…" : findBlanks(draft).length ? `FILL ${findBlanks(draft).length} BLANK${findBlanks(draft).length > 1 ? "S" : ""} FIRST` : willRun.length ? `APPROVE, DO ${willRun.length} ACTION${willRun.length > 1 ? "S" : ""} & SEND` : "APPROVE & SEND"}
                     </button>
@@ -238,6 +242,7 @@ function Blanks({ draft, setDraft, actions, onPick }: { draft: string; setDraft:
                     <button key={o} className="btn" style={{ textAlign: "left", whiteSpace: "normal" }} onClick={() => { onPick(o); fill(raw, o); }}>
                       {o}
                       {acts.map((a) => <span key={a.id} style={{ display: "block", marginTop: 4, color: "#ffc24a", fontSize: 12 }}>⚡ Also: {a.summary}</span>)}
+                      {!acts.length && <span style={{ display: "block", marginTop: 4, color: "#7fa9bf", fontSize: 12 }}>✉ Email only. Nothing changes in Shopify.</span>}
                     </button>
                   );
                 })}

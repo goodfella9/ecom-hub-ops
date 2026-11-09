@@ -7,10 +7,11 @@ type Item = { title: string; price: number; qty?: number };
 export type Action = {
   id: string;
   when?: string | null; // exact CHOOSE option text this action belongs to; null/empty = runs whenever the reply is sent
-  type: "invoice" | "cancel_refund" | "replacement" | "tag_order" | "notify_team" | "upgrade_shipping";
+  type: "invoice" | "cancel_refund" | "refund_items" | "replacement" | "tag_order" | "notify_team" | "upgrade_shipping";
   order?: string; // order name, e.g. "18778" or "AG61318"
   email?: string; // invoice recipient
-  items?: Item[] | { title: string; qty?: number }[];
+  items?: Item[] | { title: string; qty?: number; variant_id?: string }[];
+  amount?: number; // refund_items: refund a fixed amount instead of specific items
   tags?: string[];
   to?: string; subject?: string; body?: string; // notify_team
   note?: string;
@@ -30,6 +31,10 @@ export function describe(a: Action): string {
       const total = items.reduce((s, i) => s + i.price * (i.qty ?? 1), 0);
       return `Create a ${money(total)} invoice (${items.map((i) => `${i.qty && i.qty > 1 ? `${i.qty}× ` : ""}${i.title}`).join(", ")}) and email it to ${a.email}`;
     }
+    case "refund_items": {
+      const items = a.items as { title: string; qty?: number }[] | undefined;
+      return a.amount ? `Refund ${money(Number(a.amount))} on order ${a.order} to the original payment method (order stays open)` : `Refund ${items?.map((i) => `${i.qty ?? 1}× ${i.title}`).join(", ")} on order ${a.order} to the original payment method (order stays open)`;
+    }
     case "cancel_refund": return `Cancel order ${a.order} and refund it in full to the original payment method${a.restock === false ? "" : " (restock items)"}`;
     case "replacement": {
       const items = a.items as { title: string; qty?: number }[] | undefined;
@@ -48,7 +53,8 @@ export function validate(a: Action): string | null {
     const items = a.items as Item[] | undefined;
     if (!items?.length || items.some((i) => !i.title || !(Number(i.price) >= 0))) return "invoice needs items with a title and a price.";
   }
-  if ((a.type === "cancel_refund" || a.type === "replacement" || a.type === "tag_order") && !a.order) return `${a.type} needs the order name.`;
+  if ((a.type === "cancel_refund" || a.type === "refund_items" || a.type === "replacement" || a.type === "tag_order") && !a.order) return `${a.type} needs the order name.`;
+  if (a.type === "refund_items" && !(Number(a.amount) > 0) && !(a.items as any[] | undefined)?.length) return "refund_items needs items or an amount.";
   if (a.type === "tag_order" && !a.tags?.length) return "tag_order needs tags.";
   if (a.type === "upgrade_shipping" && (!a.order || !a.title || !(Number(a.extra ?? 0) >= 0))) return "upgrade_shipping needs order, title and extra (0 or more).";
   if (a.type === "notify_team" && (!a.to || !a.subject || !a.body)) return "notify_team needs to, subject and body.";
@@ -62,7 +68,7 @@ async function findOrder(storeKey: string, name: string) {
   for (const q of [`name:#${clean}`, `name:${clean}`]) {
     const r = await shopGraphQL(s, `query($q:String!){ orders(first:1, query:$q){ nodes{ id name email cancelledAt displayFinancialStatus
       customer{ id } shippingAddress{ firstName lastName company address1 address2 city provinceCode countryCodeV2 zip phone }
-      lineItems(first:50){ nodes{ title variantTitle quantity variant{ id } customAttributes{ key value } } } } } }`, { q });
+      lineItems(first:50){ nodes{ id title variantTitle quantity variant{ id } customAttributes{ key value } } } } } }`, { q });
     const o = r?.data?.orders?.nodes?.[0];
     if (o && o.name.replace(/^#/, "") === clean) return { s, o };
   }
@@ -108,14 +114,43 @@ async function run(storeKey: string, a: Action): Promise<string> {
     if (e) throw new StoreError(`Order ${o.name} not cancelled: ${e}`);
     return `Order ${o.name} cancelled and fully refunded`;
   }
+  if (a.type === "refund_items") {
+    const { o } = await findOrder(storeKey, a.order!);
+    let refundLineItems: { lineItemId: string; quantity: number; restockType: string }[] = [];
+    let transactions: any[] = [];
+    if (Number(a.amount) > 0) {
+      const tx = await shopGraphQL(s, `query($id: ID!){ order(id:$id){ transactions(first:20){ id kind status gateway amountSet{ shopMoney{ amount currencyCode } } } } }`, { id: o.id });
+      const parent = (tx?.data?.order?.transactions ?? []).find((t: any) => t.status === "SUCCESS" && (t.kind === "SALE" || t.kind === "CAPTURE"));
+      if (!parent) throw new StoreError(`No captured payment found on ${o.name} to refund against.`);
+      transactions = [{ orderId: o.id, parentId: parent.id, amount: Number(a.amount), gateway: parent.gateway, kind: "REFUND" }];
+    } else {
+      for (const w of a.items as { title: string; qty?: number }[]) {
+        const l = o.lineItems.nodes.find((l: any) => `${l.title} ${l.variantTitle ?? ""}`.toLowerCase().includes(w.title.toLowerCase()));
+        if (!l) throw new StoreError(`No item matching "${w.title}" on ${o.name}.`);
+        refundLineItems.push({ lineItemId: l.id, quantity: Math.min(w.qty ?? 1, l.quantity), restockType: "NO_RESTOCK" });
+      }
+      const sug = await shopGraphQL(s, `query($id: ID!, $li: [RefundLineItemInput!]){ order(id:$id){ suggestedRefund(refundLineItems:$li){ amountSet{ shopMoney{ amount } } suggestedTransactions{ gateway kind parentTransaction{ id } amountSet{ shopMoney{ amount } } } } } }`, { id: o.id, li: refundLineItems.map(({ lineItemId, quantity }) => ({ lineItemId, quantity })) });
+      const st = sug?.data?.order?.suggestedRefund?.suggestedTransactions ?? [];
+      if (!st.length) throw new StoreError(`Shopify couldn't work out a refund for those items on ${o.name}.`);
+      transactions = st.map((t: any) => ({ orderId: o.id, parentId: t.parentTransaction?.id, amount: Number(t.amountSet.shopMoney.amount), gateway: t.gateway, kind: "REFUND" }));
+    }
+    const r = await shopGraphQL(s, `mutation($input: RefundInput!){ refundCreate(input:$input){ refund{ totalRefundedSet{ shopMoney{ amount } } } userErrors{ message } } }`, {
+      input: { orderId: o.id, refundLineItems, transactions, notify: false, note: (a.note ?? "Partial refund from the Hub support inbox").slice(0, 250) },
+    });
+    const e = errs(r, "refundCreate");
+    if (e) throw new StoreError(`Refund on ${o.name} failed: ${e}`);
+    return `Refunded ${money(Number(r?.data?.refundCreate?.refund?.totalRefundedSet?.shopMoney?.amount ?? 0))} on ${o.name}`;
+  }
   if (a.type === "replacement") {
     const { o } = await findOrder(storeKey, a.order!);
-    const want = a.items as { title: string; qty?: number }[] | undefined;
-    const lines = o.lineItems.nodes.filter((l: any) => l.variant?.id).flatMap((l: any) => {
+    const want = a.items as { title: string; qty?: number; variant_id?: string }[] | undefined;
+    const direct = (want ?? []).filter((w) => w.variant_id).map((w) => ({ variantId: w.variant_id!, quantity: w.qty ?? 1 }));
+    const fromOrder = want?.length && direct.length === want.length ? [] : o.lineItems.nodes.filter((l: any) => l.variant?.id).flatMap((l: any) => {
       if (!want?.length) return [{ variantId: l.variant.id, quantity: l.quantity, customAttributes: l.customAttributes }];
-      const m = want.find((w) => `${l.title} ${l.variantTitle ?? ""}`.toLowerCase().includes(w.title.toLowerCase()));
+      const m = want.find((w) => !w.variant_id && `${l.title} ${l.variantTitle ?? ""}`.toLowerCase().includes(w.title.toLowerCase()));
       return m ? [{ variantId: l.variant.id, quantity: m.qty ?? 1, customAttributes: l.customAttributes }] : [];
     });
+    const lines = [...direct, ...fromOrder];
     if (!lines.length) throw new StoreError(`No matching items on ${o.name} to replace.`);
     const sa = o.shippingAddress;
     const create = await shopGraphQL(s, `mutation($input: DraftOrderInput!){ draftOrderCreate(input:$input){ draftOrder{ id name } userErrors{ message } } }`, {
