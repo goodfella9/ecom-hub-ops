@@ -2,7 +2,8 @@
 // Runs every 5 minutes from pg_cron (header x-hub-cron must match hub_secrets.cron), or on demand by a signed-in admin.
 // GET ?whoami=1 returns only the service account's public client ID (needed for domain-wide delegation).
 import { admin, CORS, json, requireAdmin } from "../_shared/hub.ts";
-import { markDone, saIdentity, sendReply, syncStore } from "../_shared/gmail.ts";
+import { findBlanks, markDone, saIdentity, sendReply, syncStore } from "../_shared/gmail.ts";
+import { runTicketActions } from "../_shared/actions.ts";
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: CORS });
@@ -24,6 +25,17 @@ Deno.serve(async (req) => {
     if (b.action) {
       try {
         if (b.action === "reply") return json({ ok: true, ...(await sendReply(b.ticket_id, String(b.body), `claude:inbox-pass (${b.reason ?? "routine"})`)) });
+        // Send a staged draft the way the Hub's Approve button does: chosen actions first, then the email.
+        if (b.action === "send") {
+          const text = String(b.body ?? "").trim();
+          if (findBlanks(text).length) return json({ ok: false, error: "Draft still has blanks." }, 400);
+          const actor = `claude:inbox-pass (${b.reason ?? "approved"})`;
+          const done = await runTicketActions(b.ticket_id, Array.isArray(b.chosen) ? b.chosen.map(String) : [], actor);
+          const sent = await sendReply(b.ticket_id, text, actor);
+          await admin.from("tickets").update({ draft_actions: [] }).eq("id", b.ticket_id);
+          if (b.file) await markDone(b.ticket_id, actor);
+          return json({ ok: true, actions_done: done, ...sent });
+        }
         if (b.action === "done") { await markDone(b.ticket_id, "claude:inbox-pass"); return json({ ok: true }); }
         if (b.action === "stage") {
           await admin.from("tickets").update({ draft_body: b.body, draft_reason: b.reason, draft_by: "claude:inbox-pass", draft_at: new Date().toISOString(), status: "awaiting_approval", updated_at: new Date().toISOString() }).eq("id", b.ticket_id);
