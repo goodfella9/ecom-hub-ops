@@ -301,14 +301,16 @@ function buildServer(actor: string) {
       actions: z.array(z.object({
         id: z.string().optional(),
         when: z.string().nullable().optional().describe("Exact text of the CHOOSE option this action belongs to (copy it character-for-character). Omit to run whenever the reply is sent."),
-        type: z.enum(["invoice", "cancel_refund", "replacement", "tag_order", "notify_team"]),
+        type: z.enum(["invoice", "cancel_refund", "replacement", "tag_order", "notify_team", "upgrade_shipping"]),
         order: z.string().optional().describe("Order name, e.g. 18778 or AG61318 (cancel_refund, replacement, tag_order)."),
         email: z.string().optional().describe("invoice: customer's email."),
         items: z.array(z.object({ title: z.string(), price: z.number().optional(), qty: z.number().int().optional() })).optional().describe("invoice: [{title, price, qty}] custom lines. replacement: [{title (matches the original line item), qty}]; omit to replace everything."),
         tags: z.array(z.string()).optional(),
         to: z.string().optional(), subject: z.string().optional(), body: z.string().optional(),
         note: z.string().optional(), message: z.string().optional(), restock: z.boolean().optional(),
-      })).optional().describe("Shopify/team actions the Hub runs BEFORE sending when Brian approves: invoice (draft order + emailed invoice), cancel_refund (cancel + full refund), replacement ($0 order, same address), tag_order, notify_team (email an internal address like graphics@covermyplate.com). Attach one to every option whose text promises something (an invoice, refund, reship, rush). If an action fails, the email isn't sent."),
+        title: z.string().optional().describe("upgrade_shipping: new shipping method exactly as ShipStation should see it, e.g. 'UPS 2nd Day Air'."),
+        extra: z.number().optional().describe("upgrade_shipping: what the customer pays on top of the shipping they already paid (0 = free upgrade). Shopify emails them a payment link for it on the same order."),
+      })).optional().describe("Shopify/team actions the Hub runs BEFORE sending when Brian approves: invoice (draft order + emailed invoice), cancel_refund (cancel + full refund), replacement ($0 order, same address), tag_order, notify_team (email an internal address like graphics@covermyplate.com), upgrade_shipping (change the order's own shipping method so ShipStation ships it that way, and invoice the difference on the same order; use this, not invoice, for shipping upgrades). Attach one to every option whose text promises something (an invoice, refund, reship, rush). If an action fails, the email isn't sent."),
     }),
     annotations: { readOnlyHint: false, destructiveHint: false },
   }, safe(async ({ ticket_id, body, reason, actions }) => {

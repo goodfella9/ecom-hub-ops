@@ -7,7 +7,7 @@ type Item = { title: string; price: number; qty?: number };
 export type Action = {
   id: string;
   when?: string | null; // exact CHOOSE option text this action belongs to; null/empty = runs whenever the reply is sent
-  type: "invoice" | "cancel_refund" | "replacement" | "tag_order" | "notify_team";
+  type: "invoice" | "cancel_refund" | "replacement" | "tag_order" | "notify_team" | "upgrade_shipping";
   order?: string; // order name, e.g. "18778" or "AG61318"
   email?: string; // invoice recipient
   items?: Item[] | { title: string; qty?: number }[];
@@ -16,6 +16,8 @@ export type Action = {
   note?: string;
   message?: string; // custom message on the Shopify invoice email
   restock?: boolean;
+  title?: string; // upgrade_shipping: new shipping method name as ShipStation should see it, e.g. "UPS 2nd Day Air"
+  extra?: number; // upgrade_shipping: amount the customer pays on top of what they already paid for shipping
   summary?: string;
 };
 
@@ -35,6 +37,7 @@ export function describe(a: Action): string {
     }
     case "tag_order": return `Tag order ${a.order}: ${(a.tags ?? []).join(", ")}`;
     case "notify_team": return `Email ${a.to}: "${a.subject}"`;
+    case "upgrade_shipping": return `Change order ${a.order}'s shipping to "${a.title}"${a.extra ? ` and have Shopify email the customer a ${money(Number(a.extra))} payment link for the difference` : " at no charge"}`;
   }
 }
 
@@ -47,6 +50,7 @@ export function validate(a: Action): string | null {
   }
   if ((a.type === "cancel_refund" || a.type === "replacement" || a.type === "tag_order") && !a.order) return `${a.type} needs the order name.`;
   if (a.type === "tag_order" && !a.tags?.length) return "tag_order needs tags.";
+  if (a.type === "upgrade_shipping" && (!a.order || !a.title || !(Number(a.extra ?? 0) >= 0))) return "upgrade_shipping needs order, title and extra (0 or more).";
   if (a.type === "notify_team" && (!a.to || !a.subject || !a.body)) return "notify_team needs to, subject and body.";
   if (a.type === "notify_team" && /@(gmail|yahoo|hotmail|aol|icloud|outlook)\./i.test(a.to ?? "")) return "notify_team is for internal team addresses only.";
   return null;
@@ -140,6 +144,33 @@ async function run(storeKey: string, a: Action): Promise<string> {
     const e = errs(r, "tagsAdd");
     if (e) throw new StoreError(`Tags not added to ${o.name}: ${e}`);
     return `Tagged ${o.name}: ${a.tags!.join(", ")}`;
+  }
+  if (a.type === "upgrade_shipping") {
+    const { o } = await findOrder(storeKey, a.order!);
+    const begin = await shopGraphQL(s, `mutation($id: ID!){ orderEditBegin(id:$id){ calculatedOrder{ id shippingLines{ id title stagedStatus price{ shopMoney{ amount currencyCode } } } } userErrors{ message } } }`, { id: o.id });
+    const e0 = errs(begin, "orderEditBegin");
+    const calc = begin?.data?.orderEditBegin?.calculatedOrder;
+    if (e0 || !calc) throw new StoreError(`Couldn't open order ${o.name} for editing: ${e0 ?? "no edit session"}`);
+    const lines = (calc.shippingLines ?? []).filter((l: any) => l.stagedStatus !== "REMOVED");
+    if (lines.some((l: any) => l.title === a.title)) return `Order ${o.name} already ships ${a.title}`;
+    const paid = lines.reduce((t: number, l: any) => t + Number(l.price?.shopMoney?.amount ?? 0), 0);
+    const currency = lines[0]?.price?.shopMoney?.currencyCode ?? "USD";
+    for (const l of lines) {
+      const r = await shopGraphQL(s, `mutation($id: ID!, $sl: ID!){ orderEditRemoveShippingLine(id:$id, shippingLineId:$sl){ userErrors{ message } } }`, { id: calc.id, sl: l.id });
+      const e = errs(r, "orderEditRemoveShippingLine");
+      if (e) throw new StoreError(`Couldn't remove the old shipping on ${o.name}: ${e}`);
+    }
+    const price = Math.round((paid + Number(a.extra ?? 0)) * 100) / 100;
+    const add = await shopGraphQL(s, `mutation($id: ID!, $sl: OrderEditAddShippingLineInput!){ orderEditAddShippingLine(id:$id, shippingLine:$sl){ userErrors{ message } } }`, { id: calc.id, sl: { title: a.title, price: { amount: price, currencyCode: currency } } });
+    const e1 = errs(add, "orderEditAddShippingLine");
+    if (e1) throw new StoreError(`Couldn't add ${a.title} to ${o.name}: ${e1}`);
+    const commit = await shopGraphQL(s, `mutation($id: ID!, $notify: Boolean, $note: String){ orderEditCommit(id:$id, notifyCustomer:$notify, staffNote:$note){ order{ name totalOutstandingSet{ shopMoney{ amount } } } userErrors{ message } } }`, {
+      id: calc.id, notify: Number(a.extra ?? 0) > 0, note: (a.note ?? `Shipping changed to ${a.title} from the Hub support inbox`).slice(0, 250),
+    });
+    const e2 = errs(commit, "orderEditCommit");
+    if (e2) throw new StoreError(`Shipping change on ${o.name} wasn't saved: ${e2}`);
+    const owed = Number(commit?.data?.orderEditCommit?.order?.totalOutstandingSet?.shopMoney?.amount ?? 0);
+    return `Order ${o.name} now ships ${a.title}${owed > 0 ? `; Shopify emailed the customer a ${money(owed)} payment link` : ""}`;
   }
   if (a.type === "notify_team") {
     const { data: st } = await admin.from("stores").select("name,support_email").eq("key", storeKey).maybeSingle();
