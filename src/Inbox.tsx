@@ -1,8 +1,9 @@
+import type React from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { callFn, supabase } from "./supabase";
 
 type Ticket = {
-  id: string; store_key: string; status: string; subject: string; customer_name: string | null; customer_email: string | null;
+  id: string; ticket_no: number; store_key: string; status: string; subject: string; customer_name: string | null; customer_email: string | null;
   category: string | null; order_ref: string | null; snippet: string | null; last_message_at: string; last_from_customer: boolean;
   unread: boolean; in_spam: boolean; draft_actions: HubAction[]; action_log: { id: string; ok: boolean; result: string }[]; draft_body: string | null; draft_reason: string | null; note: string | null; priority: number;
 };
@@ -42,6 +43,15 @@ export default function Inbox({ onCount }: { onCount: (n: number) => void }) {
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState("");
   const [msg, setMsg] = useState("");
+  const [jump, setJump] = useState("");
+  const goTo = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const n = Number(jump.replace(/\D/g, ""));
+    if (!n) return;
+    const { data } = await supabase.from("tickets").select("id,status,category").eq("ticket_no", n).maybeSingle();
+    if (!data) { setMsg(`No ticket #${n}.`); return; }
+    setStore("all"); setFilter(data.status); if (data.category === "notification") setShowSystem(true); setSel(data.id); setJump(""); setMsg("");
+  };
 
   const load = useCallback(async () => {
     const st = FILTERS.find((f) => f.k === filter)!.st;
@@ -113,6 +123,7 @@ export default function Inbox({ onCount }: { onCount: (n: number) => void }) {
       <div className="row" role="toolbar" aria-label="Filters" style={{ flexWrap: "wrap" }}>
         {FILTERS.map((f) => <button key={f.k} className={`btn chip ${filter === f.k ? "on" : ""}`} onClick={() => { setFilter(f.k); setSel(null); }}>{f.label}</button>)}
         <button className={`btn chip ${showSystem ? "on" : ""}`} onClick={() => setShowSystem(!showSystem)} aria-pressed={showSystem}>SYSTEM MAIL {systemCount ? `(${systemCount})` : ""}</button>
+        <form onSubmit={goTo} className="row" style={{ gap: 6 }}><input className="jump" value={jump} onChange={(e) => setJump(e.target.value)} placeholder="Go to #" aria-label="Go to ticket number" style={{ width: 90 }} /></form>
         <span className="spacer" />
         {["all", "cmp", "arca", "mvp"].map((k) => <button key={k} className={`btn chip ${store === k ? "on" : ""}`} onClick={() => { setStore(k); setSel(null); }}>{k === "all" ? "ALL STORES" : k.toUpperCase()}</button>)}
       </div>
@@ -126,7 +137,7 @@ export default function Inbox({ onCount }: { onCount: (n: number) => void }) {
               <button key={t.id} className={`ticket ${sel === t.id ? "on" : ""}`} onClick={() => setSel(t.id)}>
                 <div className="between" style={{ gap: 8 }}>
                   <span className="tag" style={{ color: st.col, borderColor: st.col }}>{st.label}</span>
-                  <span className="sub mono">{t.store_key.toUpperCase()} · {ago(t.last_message_at)}</span>
+                  <span className="sub mono"><b className="tno">#{t.ticket_no}</b> · {t.store_key.toUpperCase()} · {ago(t.last_message_at)}</span>
                 </div>
                 <div className={`t-from ${t.unread ? "unread" : ""}`}>{t.customer_name || t.customer_email}{t.in_spam ? " · SPAM" : ""}{t.category === "sms" ? " · TEXT" : ""}{t.category === "notification" ? " · SYSTEM" : ""}</div>
                 <div className="t-subj">{t.subject}{t.order_ref ? ` · #${t.order_ref}` : ""}</div>
@@ -140,7 +151,7 @@ export default function Inbox({ onCount }: { onCount: (n: number) => void }) {
           {!cur && <div className="sub">Pick a ticket.</div>}
           {cur && (
             <>
-              <div className="eyebrow">{STORE_NAME[cur.store_key] ?? cur.store_key} · {cur.customer_email}</div>
+              <div className="eyebrow"><span className="tno">TICKET #{cur.ticket_no}</span> · {STORE_NAME[cur.store_key] ?? cur.store_key} · {cur.customer_email}</div>
               <h2 style={{ margin: "4px 0 12px" }}>{cur.subject}</h2>
               {cur.note && <div className="panel hot" style={{ marginBottom: 12 }}><div className="label">FLAGGED</div>{cur.note}</div>}
               <div className="msgs">

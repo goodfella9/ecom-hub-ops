@@ -114,7 +114,8 @@ function buildServer(actor: string) {
         "Call apply_change only after Brian approves that summary, or when the running task's own instructions explicitly pre-approve that kind of change. " +
         "Brian can also approve staged changes in the Hub at ecomhubops.com. If a store can't be reached, report it as a connection problem, never as zero results. " +
         "Support inbox: each store's support@ mailbox syncs into tickets. Before answering a store's customers, read that store's playbook (get_playbook) — the stores are separate companies with separate voices and policies. " +
-        "Routine replies the playbook allows: inbox_reply then inbox_done. Anything needing Brian: inbox_stage_reply (with a draft) or inbox_flag (no draft).",
+        "Routine replies the playbook allows: inbox_reply then inbox_done. Anything needing Brian: inbox_stage_reply (with a draft) or inbox_flag (no draft). " +
+        "Every ticket has a number (ticket_no). When talking to Brian, always refer to tickets as #<number> with the store and customer, e.g. '#1001 (CMP, Jennifer Albert)', and accept #numbers from him.",
     },
   );
 
@@ -213,8 +214,16 @@ function buildServer(actor: string) {
   }));
 
   // ---------------- Support inbox ----------------
-  const TICKET = z.string().uuid().describe("Ticket id from inbox_list.");
-  const loadTicket = async (id: string) => {
+  const TICKET = z.union([z.string(), z.number()]).describe("Ticket number shown in inbox_list (e.g. 1001, #1001 or CMP-1001), or its id.");
+  const loadTicket = async (ref: string | number) => {
+    const r = String(ref).trim();
+    const num = r.match(/^(?:[a-z]+-)?#?(\d{1,9})$/i)?.[1];
+    if (num) {
+      const { data } = await admin.from("tickets").select("*, stores(name,support_email)").eq("ticket_no", Number(num)).maybeSingle();
+      if (!data) throw new StoreError(`No ticket #${num}. Call inbox_list for current numbers.`);
+      return data;
+    }
+    const id = r;
     const { data } = await admin.from("tickets").select("*, stores(name,support_email)").eq("id", id).maybeSingle();
     if (!data) throw new StoreError("No such ticket. Call inbox_list for current ids.");
     return data;
@@ -240,7 +249,7 @@ function buildServer(actor: string) {
     }),
     annotations: { readOnlyHint: true },
   }, safe(async ({ store, status, limit, include_notifications }) => {
-    let q = admin.from("tickets").select("id,store_key,status,subject,customer_name,customer_email,category,order_ref,snippet,last_message_at,last_from_customer,unread,in_spam,draft_body,note")
+    let q = admin.from("tickets").select("ticket_no,id,store_key,status,subject,customer_name,customer_email,category,order_ref,snippet,last_message_at,last_from_customer,unread,in_spam,draft_body,note")
       .order("last_message_at", { ascending: false }).limit(limit ?? 50);
     if (store) q = q.eq("store_key", store.toLowerCase());
     const st = status ?? "open";
@@ -262,7 +271,7 @@ function buildServer(actor: string) {
   }, safe(async ({ ticket_id }) => {
     const t = await loadTicket(ticket_id);
     const [{ data: msgs }, { data: pb }] = await Promise.all([
-      admin.from("ticket_messages").select("direction,from_addr,to_addr,subject,sent_at,body_text").eq("ticket_id", ticket_id).order("sent_at"),
+      admin.from("ticket_messages").select("direction,from_addr,to_addr,subject,sent_at,body_text").eq("ticket_id", t.id).order("sent_at"),
       admin.from("store_playbooks").select("*").eq("store_key", t.store_key).maybeSingle(),
     ]);
     return text({ ticket: { ...t, stores: undefined, store: t.stores.name, mailbox: t.stores.support_email }, messages: msgs ?? [], playbook: pb });
@@ -279,7 +288,7 @@ function buildServer(actor: string) {
   }, safe(async ({ ticket_id, body, reason }) => {
     const t = await loadTicket(ticket_id);
     if (t.status === "done") return fail("This ticket is already filed as done. If the customer wrote again, run inbox_sync first.");
-    const r = await sendReply(ticket_id, body, `${actor} (${reason})`);
+    const r = await sendReply(t.id, body, `${actor} (${reason})`);
     return text({ sent: true, store: t.stores.name, ...r, next: "Call inbox_done if nothing else is needed on this thread." });
   }));
 
@@ -306,8 +315,8 @@ function buildServer(actor: string) {
     const t = await loadTicket(ticket_id);
     const prep = prepareActions(actions as any, t.store_key);
     if (prep.error) return fail(`Action rejected: ${prep.error}`);
-    await admin.from("tickets").update({ draft_body: body, draft_reason: reason, draft_actions: prep.actions, draft_by: actor, draft_at: new Date().toISOString(), status: "awaiting_approval", updated_at: new Date().toISOString() }).eq("id", ticket_id);
-    return text({ staged: true, ticket_id, actions: prep.actions.map((a) => ({ when: a.when ?? "always", does: a.summary })), next: "Waiting for Brian in the Hub inbox. Nothing was sent or changed." });
+    await admin.from("tickets").update({ draft_body: body, draft_reason: reason, draft_actions: prep.actions, draft_by: actor, draft_at: new Date().toISOString(), status: "awaiting_approval", updated_at: new Date().toISOString() }).eq("id", t.id);
+    return text({ staged: true, ticket: `#${t.ticket_no}`, actions: prep.actions.map((a) => ({ when: a.when ?? "always", does: a.summary })), next: "Waiting for Brian in the Hub inbox. Nothing was sent or changed." });
   }));
 
   server.registerTool("inbox_flag", {
@@ -320,9 +329,9 @@ function buildServer(actor: string) {
     }),
     annotations: { readOnlyHint: false, destructiveHint: false },
   }, safe(async ({ ticket_id, note, priority, category }) => {
-    await loadTicket(ticket_id);
-    await admin.from("tickets").update({ status: "needs_you", note, priority: priority ?? 2, ...(category ? { category } : {}), updated_at: new Date().toISOString() }).eq("id", ticket_id);
-    return text({ flagged: true, ticket_id });
+    const t = await loadTicket(ticket_id);
+    await admin.from("tickets").update({ status: "needs_you", note, priority: priority ?? 2, ...(category ? { category } : {}), updated_at: new Date().toISOString() }).eq("id", t.id);
+    return text({ flagged: true, ticket: `#${t.ticket_no}` });
   }));
 
   server.registerTool("inbox_done", {
@@ -332,8 +341,8 @@ function buildServer(actor: string) {
   }, safe(async ({ ticket_id }) => {
     const t = await loadTicket(ticket_id);
     if (t.status === "awaiting_approval" || t.status === "needs_you") return fail(`This ticket is ${t.status}; it stays open for Brian.`);
-    await markDone(ticket_id, actor);
-    return text({ done: true, ticket_id });
+    await markDone(t.id, actor);
+    return text({ done: true, ticket: `#${t.ticket_no}` });
   }));
 
   server.registerTool("inbox_sync", {

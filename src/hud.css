@@ -113,3 +113,6 @@ code, .mono { font-family: var(--mono); font-size: 12px; }
 .msg.out { background: rgba(255,194,74,0.07); border-color: rgba(255,194,74,0.35); align-self: flex-end; }
 .msg-body { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 6px; }
 @media (max-width: 860px) { .inbox { grid-template-columns: 1fr; } .inbox-list { max-height: 45vh; } .msg { max-width: 100%; } }
+
+.tno{color:#ffc24a;font-weight:700;letter-spacing:.04em}
+.jump{background:rgba(10,30,45,.7);border:1px solid rgba(56,214,255,.35);color:#cfefff;border-radius:6px;padding:6px 8px;font:inherit;font-size:12px}
