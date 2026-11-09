@@ -3,7 +3,7 @@
 import { admin, getStore, shopGraphQL, StoreError } from "./hub.ts";
 import { MailError, sendNew } from "./gmail.ts";
 
-type Item = { title: string; price: number; qty?: number };
+type Item = { title: string; price: number; qty?: number; variant_id?: string; notes?: string };
 export type Action = {
   id: string;
   when?: string | null; // exact CHOOSE option text this action belongs to; null/empty = runs whenever the reply is sent
@@ -30,7 +30,7 @@ export function describe(a: Action): string {
   switch (a.type) {
     case "invoice": {
       const items = (a.items as Item[] ?? []);
-      const total = items.reduce((s, i) => s + i.price * (i.qty ?? 1), 0);
+      const total = items.reduce((s, i) => s + Number(i.price ?? 0) * (i.qty ?? 1), 0);
       const ship = a.digital ? "" : a.shipping ? ` + ${money(Number(a.shipping))} shipping` : " + free shipping";
       return `Create a ${money(total)}${ship} invoice (${items.map((i) => `${i.qty && i.qty > 1 ? `${i.qty}× ` : ""}${i.title}`).join(", ")}) and email it to ${a.email}${a.digital ? "" : ". Once paid it becomes a normal order that ships"}`;
     }
@@ -54,7 +54,7 @@ export function validate(a: Action): string | null {
   if (a.type === "invoice") {
     if (!a.email || !/@/.test(a.email)) return "invoice needs the customer's email.";
     const items = a.items as Item[] | undefined;
-    if (!items?.length || items.some((i) => !i.title || !(Number(i.price) >= 0))) return "invoice needs items with a title and a price.";
+    if (!items?.length || items.some((i) => !i.title || (!i.variant_id && !(Number(i.price) >= 0)))) return "invoice needs items with a title and either a catalog variant_id or a price.";
   }
   if ((a.type === "cancel_refund" || a.type === "refund_items" || a.type === "replacement" || a.type === "tag_order") && !a.order) return `${a.type} needs the order name.`;
   if (a.type === "refund_items" && !(Number(a.amount) > 0) && !(a.items as any[] | undefined)?.length) return "refund_items needs items or an amount.";
@@ -92,7 +92,9 @@ async function run(storeKey: string, a: Action): Promise<string> {
       input: {
         email: a.email,
         ...(c?.id ? { purchasingEntity: { customerId: c.id } } : {}),
-        lineItems: items.map((i) => ({ title: i.title, originalUnitPrice: Number(i.price), quantity: i.qty ?? 1, requiresShipping: !a.digital, ...(a.digital ? { taxable: false } : {}) })),
+        lineItems: items.map((i) => i.variant_id
+          ? { variantId: i.variant_id, quantity: i.qty ?? 1, ...(i.notes ? { customAttributes: [{ key: "Design notes", value: i.notes }] } : {}) }
+          : { title: i.title, originalUnitPrice: Number(i.price), quantity: i.qty ?? 1, requiresShipping: !a.digital, ...(a.digital ? { taxable: false } : {}), ...(i.notes ? { customAttributes: [{ key: "Design notes", value: i.notes }] } : {}) }),
         ...(a.digital ? {} : { shippingLine: { title: a.shipping ? "Shipping" : "Free shipping", priceWithCurrency: { amount: Number(a.shipping ?? 0), currencyCode: "USD" } } }),
         note: a.note ?? "Created from the Hub support inbox",
         tags: ["hub-invoice"],
@@ -259,3 +261,6 @@ export function prepareActions(actions: Action[] | undefined, store: string): { 
   void store;
   return { actions: out, error: null };
 }
+
+// Actions a scheduled run may perform without Brian (inbox_reply): billing at catalog/quoted prices and internal notices.
+export const AUTO_OK = new Set(["invoice", "tag_order", "notify_team"]);

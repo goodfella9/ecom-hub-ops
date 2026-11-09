@@ -7,7 +7,7 @@ import { withOAuthProtectedResource, withSupabase } from "npm:@supabase/server@1
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { z } from "npm:zod@^4.3.6";
 import { gmail, markDone, MailError, parseMessage, sendReply, syncStore } from "../_shared/gmail.ts";
-import { prepareActions } from "../_shared/actions.ts";
+import { AUTO_OK, prepareActions, runTicketActions } from "../_shared/actions.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const API_VERSION = Deno.env.get("SHOPIFY_API_VERSION") ?? "2026-10";
@@ -283,13 +283,24 @@ function buildServer(actor: string) {
       ticket_id: TICKET,
       body: z.string().min(2).describe("Plain-text reply, complete with greeting and signature."),
       reason: z.string().min(3).describe("Which playbook rule makes this routine, e.g. 'order status with tracking'."),
+      actions: z.array(z.record(z.string(), z.any())).optional().describe("Only invoice (catalog or already-quoted prices, per the playbook), tag_order and notify_team, same shape as in inbox_stage_reply (no `when`). They run first; if any fails nothing is emailed. Anything else (refunds, cancels, replacements, shipping changes) must go through inbox_stage_reply."),
     }),
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
-  }, safe(async ({ ticket_id, body, reason }) => {
+  }, safe(async ({ ticket_id, body, reason, actions }) => {
     const t = await loadTicket(ticket_id);
     if (t.status === "done") return fail("This ticket is already filed as done. If the customer wrote again, run inbox_sync first.");
+    let done: string[] = [];
+    if (actions?.length) {
+      const bad = actions.find((a: any) => !AUTO_OK.has(a.type) || a.when);
+      if (bad) return fail(`inbox_reply can only run invoice, tag_order and notify_team actions (no options). Use inbox_stage_reply for ${bad.type}.`);
+      const prep = prepareActions(actions as any, t.store_key);
+      if (prep.error) return fail(`Action rejected: ${prep.error}`);
+      await admin.from("tickets").update({ draft_actions: prep.actions }).eq("id", t.id);
+      done = await runTicketActions(t.id, [], `${actor} (${reason})`);
+    }
     const r = await sendReply(t.id, body, `${actor} (${reason})`);
-    return text({ sent: true, store: t.stores.name, ...r, next: "Call inbox_done if nothing else is needed on this thread." });
+    await admin.from("tickets").update({ draft_actions: [] }).eq("id", t.id);
+    return text({ sent: true, store: t.stores.name, actions_done: done, ...r, next: "Call inbox_done if nothing else is needed on this thread." });
   }));
 
   server.registerTool("inbox_stage_reply", {
@@ -304,12 +315,14 @@ function buildServer(actor: string) {
         type: z.enum(["invoice", "cancel_refund", "refund_items", "replacement", "tag_order", "notify_team", "upgrade_shipping"]),
         order: z.string().optional().describe("Order name, e.g. 18778 or AG61318 (cancel_refund, replacement, tag_order)."),
         email: z.string().optional().describe("invoice: customer's email."),
-        items: z.array(z.object({ title: z.string(), price: z.number().optional(), qty: z.number().int().optional(), variant_id: z.string().optional() })).optional().describe("invoice: [{title, price, qty}] custom lines. replacement: [{title (matches an original line item), qty}] or [{title, variant_id, qty}] to send a different product/size (look the variant id up with shopify_query); omit to replace everything. refund_items: [{title (matches an original line item), qty}]."),
+        items: z.array(z.object({ title: z.string(), price: z.number().optional(), qty: z.number().int().optional(), variant_id: z.string().optional(), notes: z.string().optional() })).optional().describe("invoice: [{title, variant_id, qty, price (catalog price, for display), notes (design details for graphics)}] using the store's real catalog variant so Shopify charges the listed price; a custom line [{title, price, qty}] only for a price already quoted in the thread. replacement: [{title (matches an original line item), qty}] or [{title, variant_id, qty}] to send a different product/size (look the variant id up with shopify_query); omit to replace everything. refund_items: [{title (matches an original line item), qty}]."),
         amount: z.number().optional().describe("refund_items: refund this fixed amount instead of specific items (e.g. the bottle part of a combo)."),
         tags: z.array(z.string()).optional(),
         to: z.string().optional(), subject: z.string().optional(), body: z.string().optional(),
         note: z.string().optional(), message: z.string().optional(), restock: z.boolean().optional(),
         title: z.string().optional().describe("upgrade_shipping: new shipping method exactly as ShipStation should see it, e.g. 'UPS 2nd Day Air'."),
+        shipping: z.number().optional().describe("invoice: shipping charge (omit = free shipping)."),
+        digital: z.boolean().optional().describe("invoice: true when nothing ships (fees)."),
         extra: z.number().optional().describe("upgrade_shipping: what the customer pays on top of the shipping they already paid (0 = free upgrade). Shopify emails them a payment link for it on the same order."),
       })).optional().describe("Shopify/team actions the Hub runs BEFORE sending when Brian approves: invoice (draft order + emailed invoice), cancel_refund (cancel + full refund), refund_items (partial refund of some items or a fixed amount, order stays open), replacement ($0 order, same address), tag_order, notify_team (email an internal address like graphics@covermyplate.com), upgrade_shipping (change the order's own shipping method so ShipStation ships it that way, and invoice the difference on the same order; use this, not invoice, for shipping upgrades). Attach one to every option whose text promises something (an invoice, refund, reship, rush). If an action fails, the email isn't sent."),
     }),
