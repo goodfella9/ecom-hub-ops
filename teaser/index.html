@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ecom Hub Ops — every store, one command center</title>
+<meta name="description" content="Live sales, ad spend, support and reviews across all your Shopify stores, with an AI co-pilot that drafts the work and waits for your yes. Private beta — join the waitlist.">
+<meta property="og:title" content="Ecom Hub Ops — every store, one command center">
+<meta property="og:description" content="Run every Shopify store from one screen. Private beta now forming.">
+<meta name="theme-color" content="#03060b">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 34 34'%3E%3Cpolygon points='17,2 30,9.5 30,24.5 17,32 4,24.5 4,9.5' fill='%2303060b' stroke='%2338d6ff' stroke-width='2'/%3E%3Ccircle cx='17' cy='17' r='4' fill='%23ffc24a'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=JetBrains+Mono:wght@400;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#03060b;--cyan:#38d6ff;--gold:#ffc24a;--red:#ff5d47;--green:#3ee08f;--text:#e6f6ff;--muted:#9fc3d6;--dim:#7fa9bf;--line:rgba(56,214,255,.25)}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--text);font:16px/1.55 Inter,system-ui,sans-serif}
+body{background-image:radial-gradient(1100px 620px at 75% -10%,rgba(56,214,255,.13),transparent 60%),radial-gradient(700px 500px at 0% 110%,rgba(255,194,74,.06),transparent 60%),linear-gradient(rgba(56,214,255,.045) 1px,transparent 1px),linear-gradient(90deg,rgba(56,214,255,.045) 1px,transparent 1px);background-size:auto,auto,32px 32px,32px 32px;background-attachment:fixed;overflow-x:hidden}
+a{color:var(--cyan)}
+.wrap{max-width:1160px;margin:0 auto;padding:0 20px}
+.scan{position:fixed;inset:0 0 auto 0;height:140px;pointer-events:none;background:linear-gradient(180deg,transparent,rgba(56,214,255,.05),transparent);animation:scan 8s linear infinite}
+@keyframes scan{0%{transform:translateY(-100%)}100%{transform:translateY(900%)}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes fill{from{stroke-dashoffset:var(--len)}to{stroke-dashoffset:var(--to)}}
+@media (prefers-reduced-motion:reduce){.scan,.pulse,.spin{animation:none!important}}
+header{display:flex;align-items:center;gap:14px;padding:22px 0}
+.brand{display:flex;align-items:center;gap:12px;font:700 22px Rajdhani,sans-serif;letter-spacing:4px}
+.pill{margin-left:auto;display:flex;align-items:center;gap:8px;padding:6px 12px;border:1px solid rgba(255,194,74,.5);border-radius:999px;font:12px 'JetBrains Mono',monospace;color:#ffd98a;letter-spacing:1px}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--gold);box-shadow:0 0 8px var(--gold)}
+.pulse{animation:pulse 2.4s ease-in-out infinite}
+.hero{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,.9fr);gap:48px;align-items:center;padding:48px 0 72px}
+@media (max-width:900px){.hero{grid-template-columns:1fr;padding-top:24px}}
+.eyebrow{font:12px 'JetBrains Mono',monospace;letter-spacing:3px;color:var(--dim)}
+h1{margin:12px 0 18px;font:700 clamp(44px,6.4vw,78px)/.98 Rajdhani,sans-serif;letter-spacing:1px}
+h1 em{font-style:normal;color:var(--cyan);text-shadow:0 0 28px rgba(56,214,255,.45)}
+.lead{font-size:19px;color:#c9e4f0;max-width:560px;margin:0 0 28px}
+form{display:flex;flex-wrap:wrap;gap:10px;max-width:560px}
+.inp{flex:1 1 230px;padding:15px 16px;border-radius:8px;border:1px solid rgba(56,214,255,.45);background:rgba(56,214,255,.05);color:var(--text);font:inherit}
+.inp:focus{outline:2px solid var(--gold);outline-offset:2px}
+select.inp{flex:0 1 170px;color:var(--muted)}
+button{padding:15px 22px;border-radius:8px;border:1px solid var(--gold);background:linear-gradient(180deg,rgba(255,194,74,.28),rgba(255,194,74,.12));color:#fff4d6;font:700 16px Rajdhani,sans-serif;letter-spacing:2px;cursor:pointer;box-shadow:0 0 22px rgba(255,194,74,.18)}
+button:hover{box-shadow:0 0 30px rgba(255,194,74,.35)}
+button:disabled{opacity:.6;cursor:default}
+.hp{position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+.note{font-size:13px;color:var(--dim);margin-top:10px}
+.msg{margin-top:12px;font:14px 'JetBrains Mono',monospace}
+.msg.ok{color:var(--green)}.msg.err{color:#ff8b78}
+.hud{position:relative;aspect-ratio:1;max-width:460px;width:100%;margin:0 auto}
+.hud svg{width:100%;height:100%;overflow:visible}
+.spin{transform-origin:230px 230px;animation:spin 40s linear infinite}
+.spin.r{animation-duration:26s;animation-direction:reverse}
+.arc{fill:none;stroke-width:9;stroke-linecap:round;animation:fill 2.2s ease-out forwards}
+.tag{font:600 13px Rajdhani,sans-serif;letter-spacing:3px;fill:var(--muted)}
+section{padding:56px 0}
+h2{font:700 clamp(30px,3.6vw,42px)/1.05 Rajdhani,sans-serif;letter-spacing:1px;margin:10px 0 28px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px}
+.card{position:relative;padding:22px;border:1px solid var(--line);border-radius:12px;background:linear-gradient(160deg,rgba(56,214,255,.07),rgba(8,16,28,.92))}
+.card h3{margin:0 0 6px;font:700 20px Rajdhani,sans-serif;letter-spacing:1px}
+.card p{margin:0;color:var(--muted);font-size:15px}
+.card .k{font:11px 'JetBrains Mono',monospace;letter-spacing:2px;color:var(--cyan);margin-bottom:10px;display:block}
+.card.gold{border-color:rgba(255,194,74,.4);background:linear-gradient(160deg,rgba(255,194,74,.08),rgba(8,16,28,.92))}
+.card.gold .k{color:var(--gold)}
+.corner{position:absolute;width:14px;height:14px;border:0 solid var(--cyan)}
+.c1{top:-1px;left:-1px;border-top-width:2px;border-left-width:2px;border-top-left-radius:12px}
+.c2{bottom:-1px;right:-1px;border-bottom-width:2px;border-right-width:2px;border-bottom-right-radius:12px}
+.steps{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px;counter-reset:s}
+.step{padding:22px;border-left:2px solid var(--cyan);background:rgba(8,16,28,.75)}
+.step b{display:block;font:700 34px Rajdhani,sans-serif;color:var(--cyan);line-height:1}
+.step h3{margin:8px 0 4px;font:700 20px Rajdhani,sans-serif;letter-spacing:1px}
+.step p{margin:0;color:var(--muted);font-size:15px}
+.cta{margin:24px 0 72px;padding:36px;border:1px solid rgba(255,194,74,.45);border-radius:14px;background:linear-gradient(160deg,rgba(255,194,74,.09),rgba(8,16,28,.92));text-align:center}
+.cta form{margin:18px auto 0;justify-content:center}
+footer{padding:28px 0 44px;border-top:1px solid rgba(56,214,255,.15);font:12px 'JetBrains Mono',monospace;color:var(--dim);display:flex;flex-wrap:wrap;gap:12px;justify-content:space-between}
+</style>
+</head>
+<body>
+<div class="scan" aria-hidden="true"></div>
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <svg width="34" height="34" viewBox="0 0 34 34" aria-hidden="true"><polygon points="17,2 30,9.5 30,24.5 17,32 4,24.5 4,9.5" fill="none" stroke="#38d6ff" stroke-width="1.5"/><polygon points="17,9 23.5,12.75 23.5,21.25 17,25 10.5,21.25 10.5,12.75" fill="rgba(56,214,255,0.18)" stroke="#38d6ff"/><circle cx="17" cy="17" r="2.6" fill="#ffc24a"/></svg>
+      ECOM HUB OPS
+    </div>
+    <div class="pill"><span class="dot pulse"></span>PRIVATE BETA</div>
+  </header>
+
+  <main>
+    <div class="hero">
+      <div>
+        <div class="eyebrow">// FOR SHOPIFY OPERATORS RUNNING MORE THAN ONE STORE</div>
+        <h1>Every store you run.<br><em>One command center.</em></h1>
+        <p class="lead">Live sales, ad spend, support and reviews for all your Shopify stores on one screen, with an AI co-pilot that drafts the work and waits for your yes.</p>
+        <form class="wl" novalidate>
+          <label class="sr" for="e1">Email</label>
+          <input class="inp" id="e1" type="email" name="email" placeholder="you@yourstore.com" autocomplete="email" required>
+          <label class="sr" for="s1">How many stores do you run?</label>
+          <select class="inp" id="s1" name="stores"><option value="">How many stores?</option><option>1</option><option>2-3</option><option>4-10</option><option>10+</option></select>
+          <div class="hp" aria-hidden="true"><label>Company<input name="company" tabindex="-1" autocomplete="off"></label></div>
+          <button type="submit">REQUEST ACCESS</button>
+          <div class="msg" role="status" aria-live="polite"></div>
+        </form>
+        <div class="note">Early access opens in waves. We'll only email you about your invite.</div>
+      </div>
+
+      <div class="hud" aria-hidden="true">
+        <svg viewBox="0 0 460 460">
+          <circle cx="230" cy="230" r="214" fill="none" stroke="rgba(56,214,255,.18)"/>
+          <g class="spin"><circle cx="230" cy="230" r="196" fill="none" stroke="rgba(56,214,255,.35)" stroke-dasharray="2 10"/></g>
+          <g class="spin r"><circle cx="230" cy="230" r="176" fill="none" stroke="rgba(255,194,74,.35)" stroke-dasharray="40 14 4 14"/></g>
+          <circle cx="230" cy="230" r="150" fill="none" stroke="rgba(56,214,255,.12)" stroke-width="9"/>
+          <circle class="arc" cx="230" cy="230" r="150" stroke="#38d6ff" style="--len:942;--to:280;stroke-dasharray:942;stroke-dashoffset:942;filter:drop-shadow(0 0 6px #38d6ff)" transform="rotate(-90 230 230)"/>
+          <circle cx="230" cy="230" r="126" fill="none" stroke="rgba(255,194,74,.12)" stroke-width="9"/>
+          <circle class="arc" cx="230" cy="230" r="126" stroke="#ffc24a" style="--len:792;--to:330;stroke-dasharray:792;stroke-dashoffset:792;animation-delay:.3s;filter:drop-shadow(0 0 6px #ffc24a)" transform="rotate(-90 230 230)"/>
+          <circle cx="230" cy="230" r="102" fill="none" stroke="rgba(62,224,143,.12)" stroke-width="9"/>
+          <circle class="arc" cx="230" cy="230" r="102" stroke="#3ee08f" style="--len:641;--to:120;stroke-dasharray:641;stroke-dashoffset:641;animation-delay:.6s;filter:drop-shadow(0 0 6px #3ee08f)" transform="rotate(-90 230 230)"/>
+          <polygon points="230,170 282,200 282,260 230,290 178,260 178,200" fill="rgba(56,214,255,.10)" stroke="#38d6ff" stroke-width="1.5"/>
+          <circle cx="230" cy="230" r="9" fill="#ffc24a" style="filter:drop-shadow(0 0 10px #ffc24a)"/>
+          <text class="tag" x="230" y="28" text-anchor="middle">SALES</text>
+          <text class="tag" x="446" y="235" text-anchor="end">ADS</text>
+          <text class="tag" x="230" y="448" text-anchor="middle">SUPPORT</text>
+          <text class="tag" x="14" y="235">REVIEWS</text>
+        </svg>
+      </div>
+    </div>
+
+    <section aria-labelledby="what">
+      <div class="eyebrow">// WHAT'S INSIDE</div>
+      <h2 id="what">Stop tab-hopping between stores.</h2>
+      <div class="grid">
+        <div class="card"><span class="corner c1"></span><span class="corner c2"></span><span class="k">LIVE OVERVIEW</span><h3>Every store at a glance</h3><p>Today's sales and orders for each store side by side, refreshing on their own, with alerts the moment something looks off.</p></div>
+        <div class="card"><span class="corner c1"></span><span class="corner c2"></span><span class="k">AD SPEND</span><h3>Spend vs. return, per store</h3><p>See what each store spent on ads today and what came back, so a money-losing campaign gets flagged instead of found next month.</p></div>
+        <div class="card"><span class="corner c1"></span><span class="corner c2"></span><span class="k">SUPPORT</span><h3>One inbox for every store</h3><p>Customer emails from all your stores in one queue. Routine replies drafted in each store's voice, from each store's address.</p></div>
+        <div class="card"><span class="corner c1"></span><span class="corner c2"></span><span class="k">REVIEWS</span><h3>Your own review engine</h3><p>Ask for reviews after delivery, show them on your storefronts, and answer the bad ones fast, without another app subscription.</p></div>
+        <div class="card"><span class="corner c1"></span><span class="corner c2"></span><span class="k">CUSTOM ORDERS</span><h3>Proofs to production</h3><p>For personalized products: proofs, the designer queue and production in one place, across every brand you run.</p></div>
+        <div class="card gold"><span class="k">YOU STAY IN CONTROL</span><h3>AI prepares. You approve.</h3><p>The co-pilot reads everything and drafts the fixes. Nothing changes in your stores until you say yes, and every change is logged.</p></div>
+      </div>
+    </section>
+
+    <section aria-labelledby="how">
+      <div class="eyebrow">// HOW IT WORKS</div>
+      <h2 id="how">Connected in an afternoon.</h2>
+      <div class="steps">
+        <div class="step"><b>01</b><h3>Link your stores</h3><p>Each store connects with its own private Shopify app. Add a new store anytime.</p></div>
+        <div class="step"><b>02</b><h3>See everything live</h3><p>Sales, ads, inbox and reviews from every store land on one screen.</p></div>
+        <div class="step"><b>03</b><h3>Approve, don't babysit</h3><p>Your co-pilot handles the routine and stages the rest for a one-click yes.</p></div>
+      </div>
+    </section>
+
+    <div class="cta">
+      <div class="eyebrow">// BUILT BY A MULTI-STORE OPERATOR, FOR MULTI-STORE OPERATORS</div>
+      <h2 style="margin-bottom:6px">Get on the list for early access.</h2>
+      <form class="wl" novalidate>
+        <label class="sr" for="e2">Email</label>
+        <input class="inp" id="e2" type="email" name="email" placeholder="you@yourstore.com" autocomplete="email" required>
+        <label class="sr" for="s2">How many stores do you run?</label>
+        <select class="inp" id="s2" name="stores"><option value="">How many stores?</option><option>1</option><option>2-3</option><option>4-10</option><option>10+</option></select>
+        <div class="hp" aria-hidden="true"><label>Company<input name="company" tabindex="-1" autocomplete="off"></label></div>
+        <button type="submit">REQUEST ACCESS</button>
+        <div class="msg" role="status" aria-live="polite" style="flex-basis:100%"></div>
+      </form>
+    </div>
+  </main>
+
+  <footer>
+    <span>© 2026 ECOM HUB OPS</span>
+    <span>YOUR EMAIL IS USED ONLY FOR YOUR INVITE. NO SPAM, NO SHARING.</span>
+  </footer>
+</div>
+<script>
+const ENDPOINT = "https://rvhjfxzwxidzcdbtbxcg.supabase.co/functions/v1/waitlist";
+document.querySelectorAll("form.wl").forEach((f) => {
+  f.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const msg = f.querySelector(".msg"), btn = f.querySelector("button");
+    const d = Object.fromEntries(new FormData(f));
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]{2,}$/.test(d.email || "")) { msg.className = "msg err"; msg.textContent = "Please enter a valid email."; return; }
+    btn.disabled = true; btn.textContent = "SENDING…";
+    try {
+      const r = await fetch(ENDPOINT, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(d) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) throw new Error(j.error || "Something went wrong. Try again in a minute.");
+      msg.className = "msg ok"; msg.textContent = "You're on the list. Watch your inbox for an invite.";
+      f.querySelector("input[type=email]").value = ""; btn.textContent = "ON THE LIST ✓";
+    } catch (err) {
+      msg.className = "msg err"; msg.textContent = err.message; btn.disabled = false; btn.textContent = "REQUEST ACCESS";
+    }
+  });
+});
+</script>
+</body>
+</html>
