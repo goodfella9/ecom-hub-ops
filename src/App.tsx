@@ -4,6 +4,7 @@ import { supabase } from "./supabase";
 import Overview from "./Overview";
 import Stores from "./Stores";
 import Changes from "./Changes";
+import Waitlist from "./Waitlist";
 
 export function navigate(path: string) {
   history.pushState(null, "", path);
@@ -54,12 +55,13 @@ const NAV = [
   { path: "/", label: "Overview" },
   { path: "/changes", label: "Approvals" },
   { path: "/stores", label: "Stores" },
+  { path: "/waitlist", label: "Waitlist" },
   { path: "#", label: "Support inbox", soon: "PHASE 2" },
   { path: "#", label: "Reviews", soon: "PHASE 3" },
   { path: "#", label: "Custom hubs", soon: "PHASE 4" },
 ];
 
-function Shell({ path, session, children, pending }: { path: string; session: Session; children: ReactNode; pending: number }) {
+function Shell({ path, session, children, pending, waitlist }: { path: string; session: Session; children: ReactNode; pending: number; waitlist: number }) {
   return (
     <>
       <div className="scan" aria-hidden="true" />
@@ -71,7 +73,7 @@ function Shell({ path, session, children, pending }: { path: string; session: Se
               aria-current={path === n.path ? "page" : undefined}
               onClick={(e) => { e.preventDefault(); if (!n.soon) navigate(n.path); }}>
               <span className="tick" />{n.label}
-              <span className="badge">{n.soon ?? (n.path === "/changes" && pending ? pending : "")}</span>
+              <span className="badge">{n.soon ?? (n.path === "/changes" && pending ? pending : n.path === "/waitlist" && waitlist ? waitlist : "")}</span>
             </a>
           ))}
         </nav>
@@ -157,6 +159,11 @@ export default function App() {
   const path = usePath();
   const [session, setSession] = useState<Session | null | undefined>(undefined);
   const [pending, setPending] = useState(0);
+  const [waitlist, setWaitlist] = useState(0);
+  useEffect(() => {
+    if (!session) return;
+    supabase.from("waitlist").select("id", { count: "exact", head: true }).then(({ count }) => setWaitlist(count ?? 0));
+  }, [session]);
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
     const { data } = supabase.auth.onAuthStateChange((_e, s) => setSession(s));
@@ -170,8 +177,8 @@ export default function App() {
   if (path === "/oauth/consent") return <Consent session={session} />;
 
   return (
-    <Shell path={path} session={session} pending={pending}>
-      {path === "/stores" ? <Stores /> : path === "/changes" ? <Changes onCount={setPending} /> : <Overview onPending={setPending} />}
+    <Shell path={path} session={session} pending={pending} waitlist={waitlist}>
+      {path === "/stores" ? <Stores /> : path === "/waitlist" ? <Waitlist onCount={setWaitlist} /> : path === "/changes" ? <Changes onCount={setPending} /> : <Overview onPending={setPending} />}
     </Shell>
   );
 }
