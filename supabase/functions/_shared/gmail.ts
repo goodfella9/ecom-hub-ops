@@ -246,6 +246,15 @@ export async function sendReply(ticketId: string, body: string, actor: string) {
   return { to, subject, message_id: sent.id as string };
 }
 
+// A new (non-reply) email from a store mailbox, e.g. to the internal graphics team.
+export async function sendNew(mailbox: string, fromName: string, to: string, subject: string, body: string) {
+  const mime = [
+    `From: ${rfc2047(fromName)} <${mailbox}>`, `To: ${to}`, `Subject: ${rfc2047(subject)}`,
+    "MIME-Version: 1.0", "Content-Type: text/plain; charset=UTF-8", "Content-Transfer-Encoding: 8bit", "", body,
+  ].join("\r\n");
+  return await gmail(mailbox, "/messages/send", { method: "POST", body: JSON.stringify({ raw: b64url(mime) }) });
+}
+
 export async function markDone(ticketId: string, actor: string) {
   const { data: t } = await admin.from("tickets").select("store_key,gmail_thread_id,subject,in_spam,stores(support_email)").eq("id", ticketId).maybeSingle();
   if (!t) throw new MailError("No such ticket.");

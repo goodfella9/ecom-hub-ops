@@ -7,6 +7,7 @@ import { withOAuthProtectedResource, withSupabase } from "npm:@supabase/server@1
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { z } from "npm:zod@^4.3.6";
 import { gmail, markDone, MailError, parseMessage, sendReply, syncStore } from "../_shared/gmail.ts";
+import { prepareActions } from "../_shared/actions.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const API_VERSION = Deno.env.get("SHOPIFY_API_VERSION") ?? "2026-10";
@@ -288,12 +289,25 @@ function buildServer(actor: string) {
       ticket_id: TICKET,
       body: z.string().min(2),
       reason: z.string().min(3).describe("Why Brian needs to decide, plus your recommendation (one or two lines)."),
+      actions: z.array(z.object({
+        id: z.string().optional(),
+        when: z.string().nullable().optional().describe("Exact text of the CHOOSE option this action belongs to (copy it character-for-character). Omit to run whenever the reply is sent."),
+        type: z.enum(["invoice", "cancel_refund", "replacement", "tag_order", "notify_team"]),
+        order: z.string().optional().describe("Order name, e.g. 18778 or AG61318 (cancel_refund, replacement, tag_order)."),
+        email: z.string().optional().describe("invoice: customer's email."),
+        items: z.array(z.object({ title: z.string(), price: z.number().optional(), qty: z.number().int().optional() })).optional().describe("invoice: [{title, price, qty}] custom lines. replacement: [{title (matches the original line item), qty}]; omit to replace everything."),
+        tags: z.array(z.string()).optional(),
+        to: z.string().optional(), subject: z.string().optional(), body: z.string().optional(),
+        note: z.string().optional(), message: z.string().optional(), restock: z.boolean().optional(),
+      })).optional().describe("Shopify/team actions the Hub runs BEFORE sending when Brian approves: invoice (draft order + emailed invoice), cancel_refund (cancel + full refund), replacement ($0 order, same address), tag_order, notify_team (email an internal address like graphics@covermyplate.com). Attach one to every option whose text promises something (an invoice, refund, reship, rush). If an action fails, the email isn't sent."),
     }),
     annotations: { readOnlyHint: false, destructiveHint: false },
-  }, safe(async ({ ticket_id, body, reason }) => {
-    await loadTicket(ticket_id);
-    await admin.from("tickets").update({ draft_body: body, draft_reason: reason, draft_by: actor, draft_at: new Date().toISOString(), status: "awaiting_approval", updated_at: new Date().toISOString() }).eq("id", ticket_id);
-    return text({ staged: true, ticket_id, next: "Waiting for Brian in the Hub inbox. Nothing was sent." });
+  }, safe(async ({ ticket_id, body, reason, actions }) => {
+    const t = await loadTicket(ticket_id);
+    const prep = prepareActions(actions as any, t.store_key);
+    if (prep.error) return fail(`Action rejected: ${prep.error}`);
+    await admin.from("tickets").update({ draft_body: body, draft_reason: reason, draft_actions: prep.actions, draft_by: actor, draft_at: new Date().toISOString(), status: "awaiting_approval", updated_at: new Date().toISOString() }).eq("id", ticket_id);
+    return text({ staged: true, ticket_id, actions: prep.actions.map((a) => ({ when: a.when ?? "always", does: a.summary })), next: "Waiting for Brian in the Hub inbox. Nothing was sent or changed." });
   }));
 
   server.registerTool("inbox_flag", {

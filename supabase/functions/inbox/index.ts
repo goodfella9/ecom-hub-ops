@@ -1,6 +1,7 @@
 // Hub inbox actions for a signed-in admin: send (approve) a reply, save/discard a draft, file as done, reopen.
 import { admin, CORS, json, requireAdmin } from "../_shared/hub.ts";
-import { markDone, sendReply } from "../_shared/gmail.ts";
+import { findBlanks, markDone, sendReply } from "../_shared/gmail.ts";
+import { runTicketActions } from "../_shared/actions.ts";
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: CORS });
@@ -8,20 +9,26 @@ Deno.serve(async (req) => {
   const who = await requireAdmin(req);
   if (who instanceof Response) return who;
   const actor = `hub:${who.email}`;
-  const { action, ticket_id, body, note } = await req.json().catch(() => ({}));
+  const { action, ticket_id, body, note, actions } = await req.json().catch(() => ({}));
   if (!ticket_id) return json({ error: "ticket_id required" }, 400);
   try {
     switch (action) {
       case "send": {
         const text = String(body ?? "").trim();
         if (text.length < 2) return json({ error: "The reply is empty." }, 400);
-        return json({ ok: true, ...(await sendReply(ticket_id, text, actor)) });
+        const blanks = findBlanks(text);
+        if (blanks.length) return json({ error: `Nothing done: fill in ${blanks.length} blank${blanks.length > 1 ? "s" : ""} first.` }, 400);
+        // Actions first (invoice, refund, replacement...). If any fails, nothing is emailed.
+        const done = await runTicketActions(ticket_id, Array.isArray(actions) ? actions.map(String) : [], actor);
+        const sent = await sendReply(ticket_id, text, actor);
+        await admin.from("tickets").update({ draft_actions: [] }).eq("id", ticket_id);
+        return json({ ok: true, actions_done: done, ...sent });
       }
       case "save_draft":
         await admin.from("tickets").update({ draft_body: String(body ?? ""), draft_by: actor, draft_at: new Date().toISOString(), status: "awaiting_approval", updated_at: new Date().toISOString() }).eq("id", ticket_id);
         return json({ ok: true });
       case "discard_draft":
-        await admin.from("tickets").update({ draft_body: null, draft_reason: null, status: "needs_you", updated_at: new Date().toISOString() }).eq("id", ticket_id);
+        await admin.from("tickets").update({ draft_body: null, draft_reason: null, draft_actions: [], status: "needs_you", updated_at: new Date().toISOString() }).eq("id", ticket_id);
         return json({ ok: true });
       case "note":
         await admin.from("tickets").update({ note: String(note ?? ""), updated_at: new Date().toISOString() }).eq("id", ticket_id);

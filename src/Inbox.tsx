@@ -4,7 +4,7 @@ import { callFn, supabase } from "./supabase";
 type Ticket = {
   id: string; store_key: string; status: string; subject: string; customer_name: string | null; customer_email: string | null;
   category: string | null; order_ref: string | null; snippet: string | null; last_message_at: string; last_from_customer: boolean;
-  unread: boolean; in_spam: boolean; draft_body: string | null; draft_reason: string | null; note: string | null; priority: number;
+  unread: boolean; in_spam: boolean; draft_actions: HubAction[]; action_log: { id: string; ok: boolean; result: string }[]; draft_body: string | null; draft_reason: string | null; note: string | null; priority: number;
 };
 type Msg = { id: string; direction: "in" | "out"; from_addr: string; to_addr: string; sent_at: string; body_text: string };
 type Sync = { store_key: string; mailbox: string; last_sync_at: string | null; ok: boolean | null; detail: string | null };
@@ -64,14 +64,19 @@ export default function Inbox({ onCount }: { onCount: (n: number) => void }) {
     if (!sel) return;
     supabase.from("ticket_messages").select("id,direction,from_addr,to_addr,sent_at,body_text").eq("ticket_id", sel).order("sent_at").then(({ data }) => setMsgs(data ?? []));
   }, [sel, cur?.last_message_at]);
-  useEffect(() => { setDraft(cur?.draft_body ?? ""); setMsg(""); }, [cur?.id, cur?.draft_body]);
+  const [chosen, setChosen] = useState<string[]>([]);
+  useEffect(() => { setDraft(cur?.draft_body ?? ""); setMsg(""); setChosen([]); }, [cur?.id, cur?.draft_body]);
+  const actions = cur?.draft_actions ?? [];
+  // Actions that will run: always-run ones + those tied to an option Brian picked (and whose text is still in the reply).
+  const willRun = actions.filter((a) => !a.when || (chosen.includes(a.id) && draft.includes(a.when)));
+  const doneIds = new Set((cur?.action_log ?? []).filter((l) => l.ok).map((l) => l.id));
 
   const act = async (action: string, extra: Record<string, unknown> = {}) => {
     if (!cur) return;
     setBusy(action); setMsg("");
     try {
       const r: any = await callFn("inbox", { action, ticket_id: cur.id, ...extra });
-      setMsg(action === "send" ? `Sent to ${r.to}.` : action === "done" ? "Filed as Completed." : "Saved.");
+      setMsg(action === "send" ? `${(r.actions_done ?? []).length ? `Done: ${r.actions_done.join(" · ")}. ` : ""}Sent to ${r.to}.` : action === "done" ? "Filed as Completed." : "Saved.");
       await load();
     } catch (e) { setMsg((e as Error).message); }
     setBusy("");
@@ -149,15 +154,24 @@ export default function Inbox({ onCount }: { onCount: (n: number) => void }) {
               {cur.status !== "done" && (
                 <div className="reply">
                   {cur.draft_reason && <div className="panel warm" style={{ marginBottom: 10 }}><div className="label">WHY THIS NEEDS YOU</div>{cur.draft_reason}</div>}
-                  <Blanks draft={draft} setDraft={setDraft} />
+                  <Blanks draft={draft} setDraft={setDraft} actions={actions} onPick={(text) => setChosen((c) => [...new Set([...c, ...actions.filter((a) => a.when === text).map((a) => a.id)])])} />
                   <label className="field"><span className="label">REPLY {cur.draft_body ? "(DRAFT BY CLAUDE — EDIT FREELY)" : ""}</span>
                     <textarea rows={8} value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="Write a reply…"
                       style={findBlanks(draft).length ? { borderColor: "#ff5d47", boxShadow: "0 0 0 1px #ff5d47" } : undefined} />
                   </label>
                   {findBlanks(draft).length > 0 && <Preview draft={draft} />}
                   <div className="row" style={{ marginTop: 10, flexWrap: "wrap" }}>
-                    <button className="btn gold" disabled={!!busy || draft.trim().length < 2 || findBlanks(draft).length > 0} onClick={() => act("send", { body: draft })}>
-                      {busy === "send" ? "SENDING…" : findBlanks(draft).length ? `FILL ${findBlanks(draft).length} BLANK${findBlanks(draft).length > 1 ? "S" : ""} FIRST` : "APPROVE & SEND"}
+                    {willRun.length > 0 && findBlanks(draft).length === 0 && (
+                    <div className="panel warm" style={{ marginTop: 10 }}>
+                      <div className="label">WHEN YOU APPROVE, THE HUB WILL FIRST:</div>
+                      <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+                        {willRun.map((a) => <li key={a.id}>{a.summary}{doneIds.has(a.id) ? " (already done)" : ""}</li>)}
+                      </ul>
+                      <div className="sub" style={{ marginTop: 6 }}>If any step fails, the email is not sent.</div>
+                    </div>
+                  )}
+                  <button className="btn gold" disabled={!!busy || draft.trim().length < 2 || findBlanks(draft).length > 0} onClick={() => act("send", { body: draft, actions: willRun.map((a) => a.id) })}>
+                      {busy === "send" ? "WORKING…" : findBlanks(draft).length ? `FILL ${findBlanks(draft).length} BLANK${findBlanks(draft).length > 1 ? "S" : ""} FIRST` : willRun.length ? `APPROVE, DO ${willRun.length} ACTION${willRun.length > 1 ? "S" : ""} & SEND` : "APPROVE & SEND"}
                     </button>
                     <button className="btn" disabled={!!busy} onClick={() => act("save_draft", { body: draft })}>SAVE DRAFT</button>
                     {cur.draft_body && <button className="btn" disabled={!!busy} onClick={() => act("discard_draft")}>DISCARD DRAFT</button>}
@@ -190,7 +204,9 @@ function parseBlank(raw: string): { kind: "choose" | "add"; label: string; optio
   return { kind: "add", label: inner.replace(/^(ADD|INSERT|FILL|TBD)\s*:?\s*/i, "") || "Fill this in", options: [] };
 }
 
-function Blanks({ draft, setDraft }: { draft: string; setDraft: (s: string) => void }) {
+export type HubAction = { id: string; when?: string | null; type: string; summary: string };
+
+function Blanks({ draft, setDraft, actions, onPick }: { draft: string; setDraft: (s: string) => void; actions: HubAction[]; onPick: (text: string) => void }) {
   const blanks = findBlanks(draft);
   const [vals, setVals] = useState<Record<string, string>>({});
   if (!blanks.length) return null;
@@ -205,7 +221,15 @@ function Blanks({ draft, setDraft }: { draft: string; setDraft: (s: string) => v
             <div className="sub" style={{ color: "#ff8b78" }}>{b.kind === "choose" ? "Pick one:" : `Add: ${b.label}`}</div>
             {b.kind === "choose" ? (
               <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6 }}>
-                {b.options.map((o) => <button key={o} className="btn" style={{ textAlign: "left", whiteSpace: "normal" }} onClick={() => fill(raw, o)}>{o}</button>)}
+                {b.options.map((o) => {
+                  const acts = actions.filter((a) => a.when === o);
+                  return (
+                    <button key={o} className="btn" style={{ textAlign: "left", whiteSpace: "normal" }} onClick={() => { onPick(o); fill(raw, o); }}>
+                      {o}
+                      {acts.map((a) => <span key={a.id} style={{ display: "block", marginTop: 4, color: "#ffc24a", fontSize: 12 }}>⚡ Also: {a.summary}</span>)}
+                    </button>
+                  );
+                })}
               </div>
             ) : (
               <form className="row" style={{ marginTop: 6 }} onSubmit={(e) => { e.preventDefault(); fill(raw, vals[raw] ?? ""); }}>
