@@ -10,6 +10,21 @@ export const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
   auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
 });
 
+// Like callFn, but for functions that return a file (e.g. an email attachment).
+export async function fetchFile(name: string, body: unknown): Promise<Blob> {
+  const { data: s } = await supabase.auth.getSession();
+  const res = await fetch(`${SUPABASE_URL}/functions/v1/${name}`, {
+    method: "POST",
+    headers: { apikey: SUPABASE_KEY, authorization: `Bearer ${s.session?.access_token ?? ""}`, "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const json = await res.json().catch(() => ({}));
+    throw new Error(json.error ?? `HTTP ${res.status}`);
+  }
+  return await res.blob();
+}
+
 export async function callFn<T>(name: string, body?: unknown): Promise<T> {
   const { data: s } = await supabase.auth.getSession();
   const res = await fetch(`${SUPABASE_URL}/functions/v1/${name}`, {

@@ -6,8 +6,8 @@ import { pipeline } from "npm:@supabase/middleware@1";
 import { withOAuthProtectedResource, withSupabase } from "npm:@supabase/server@1";
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { z } from "npm:zod@^4.3.6";
-import { gmail, markDone, MailError, parseMessage, sendReply, syncStore } from "../_shared/gmail.ts";
-import { AUTO_OK, prepareActions, runTicketActions } from "../_shared/actions.ts";
+import { getAttachment, gmail, markDone, MailError, parseMessage, sendReply, syncStore } from "../_shared/gmail.ts";
+import { ALL_ACTIONS, AUTO_OK, prepareActions, runTicketActions } from "../_shared/actions.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const API_VERSION = Deno.env.get("SHOPIFY_API_VERSION") ?? "2026-10";
@@ -115,6 +115,8 @@ function buildServer(actor: string) {
         "Brian can also approve staged changes in the Hub at ecomhubops.com. If a store can't be reached, report it as a connection problem, never as zero results. " +
         "Support inbox: each store's support@ mailbox syncs into tickets. Before answering a store's customers, read that store's playbook (get_playbook) — the stores are separate companies with separate voices and policies. " +
         "Routine replies the playbook allows: inbox_reply then inbox_done. Anything needing Brian: inbox_stage_reply (with a draft) or inbox_flag (no draft). " +
+        "Tickets with status for_claude carry a written instruction from Brian (the `instruction` field): handle those FIRST. His instruction is the approval for what it asks, so on those tickets inbox_reply and inbox_run_actions accept every action type (refunds, replacements, cancellations, shipping upgrades). Do exactly what he wrote, nothing more; then inbox_done. If it can't be done as written (order not found, amount differs, action fails), inbox_flag it back with what happened. " +
+        "Customers' attached files (photos, PDFs) are listed per message in inbox_thread; open an image with inbox_attachment when a decision depends on it. " +
         "Every ticket has a number (ticket_no). When talking to Brian, always refer to tickets as #<number> with the store and customer, e.g. '#1001 (CMP, Jennifer Albert)', and accept #numbers from him.",
     },
   );
@@ -240,20 +242,20 @@ function buildServer(actor: string) {
   }));
 
   server.registerTool("inbox_list", {
-    description: "List support tickets (one per email thread) across all stores or one store. Default shows open work: new, needs_you, awaiting_approval. Statuses: new (customer waiting, untouched), needs_you (flagged for Brian), awaiting_approval (reply drafted, waiting for Brian in the Hub), replied (we answered last), done (filed with the Completed label).",
+    description: "List support tickets (one per email thread) across all stores or one store. Default shows open work: for_claude, new, needs_you, awaiting_approval (for_claude listed first). Statuses: for_claude (Brian left Claude an instruction to carry out, see `instruction`), new (customer waiting, untouched), needs_you (flagged for Brian), awaiting_approval (reply drafted, waiting for Brian in the Hub), replied (we answered last), done (filed with the Completed label).",
     inputSchema: z.object({
       store: STORE.optional(),
-      status: z.enum(["open", "new", "needs_you", "awaiting_approval", "replied", "done", "all"]).optional(),
+      status: z.enum(["open", "for_claude", "new", "needs_you", "awaiting_approval", "replied", "done", "all"]).optional(),
       limit: z.number().int().min(1).max(100).optional(),
       include_notifications: z.boolean().optional().describe("Also list system mail (Shopify/ad/shipping notifications, no-reply senders). Off by default; file those with inbox_done in bulk when the playbook says to."),
     }),
     annotations: { readOnlyHint: true },
   }, safe(async ({ store, status, limit, include_notifications }) => {
-    let q = admin.from("tickets").select("ticket_no,id,store_key,status,subject,customer_name,customer_email,category,order_ref,snippet,last_message_at,last_from_customer,unread,in_spam,draft_body,note")
+    let q = admin.from("tickets").select("ticket_no,id,store_key,status,subject,customer_name,customer_email,category,order_ref,snippet,last_message_at,last_from_customer,unread,in_spam,draft_body,note,instruction,instruction_by,instruction_at")
       .order("last_message_at", { ascending: false }).limit(limit ?? 50);
     if (store) q = q.eq("store_key", store.toLowerCase());
     const st = status ?? "open";
-    if (st === "open") q = q.in("status", ["new", "needs_you", "awaiting_approval"]);
+    if (st === "open") q = q.in("status", ["for_claude", "new", "needs_you", "awaiting_approval"]);
     else if (st !== "all") q = q.eq("status", st);
     if (!include_notifications) q = q.or("category.is.null,category.neq.notification");
     const { data } = await q;
@@ -261,29 +263,53 @@ function buildServer(actor: string) {
     if (store) nq = nq.eq("store_key", store.toLowerCase());
     const { count: notices } = await nq;
     const { data: sync } = await admin.from("gmail_sync_state").select("store_key,mailbox,last_sync_at,ok,detail");
-    return text({ inbox_connection: sync ?? [], unfiled_notifications: notices ?? 0, tickets: (data ?? []).map((t) => ({ ...t, draft_body: t.draft_body ? "(draft waiting)" : null })) });
+    return text({ inbox_connection: sync ?? [], unfiled_notifications: notices ?? 0, tickets: (data ?? []).sort((a, b) => Number(b.status === "for_claude") - Number(a.status === "for_claude"))
+      .map((t) => ({ ...t, draft_body: t.draft_body ? "(draft waiting)" : null, ...(t.status === "for_claude" ? {} : { instruction: undefined, instruction_by: undefined, instruction_at: undefined }) })) });
   }));
 
   server.registerTool("inbox_thread", {
-    description: "Read a ticket's full email thread (every message, oldest first, quoted history removed) plus its store's playbook. Read this before replying so you never repeat or contradict an earlier reply.",
+    description: "Read a ticket's full email thread (every message, oldest first, quoted history removed) plus its store's playbook. Read this before replying so you never repeat or contradict an earlier reply. Each message lists its attached files (part_id, filename, mime, size); open one with inbox_attachment. If the ticket is for_claude, `instruction` is what Brian wants done.",
     inputSchema: z.object({ ticket_id: TICKET }),
     annotations: { readOnlyHint: true },
   }, safe(async ({ ticket_id }) => {
     const t = await loadTicket(ticket_id);
     const [{ data: msgs }, { data: pb }] = await Promise.all([
-      admin.from("ticket_messages").select("direction,from_addr,to_addr,subject,sent_at,body_text").eq("ticket_id", t.id).order("sent_at"),
+      admin.from("ticket_messages").select("id,direction,from_addr,to_addr,subject,sent_at,body_text,attachments").eq("ticket_id", t.id).order("sent_at"),
       admin.from("store_playbooks").select("*").eq("store_key", t.store_key).maybeSingle(),
     ]);
-    return text({ ticket: { ...t, stores: undefined, store: t.stores.name, mailbox: t.stores.support_email }, messages: msgs ?? [], playbook: pb });
+    return text({
+      ticket: { ...t, stores: undefined, store: t.stores.name, mailbox: t.stores.support_email },
+      messages: (msgs ?? []).map((m) => ({ ...m, id: undefined, message_id: m.id, attachments: (m.attachments ?? []).length ? m.attachments : undefined })),
+      playbook: pb,
+    });
+  }));
+
+  server.registerTool("inbox_attachment", {
+    description: "Open a file a customer attached (listed per message in inbox_thread). Images (JPEG, PNG, GIF, WebP) come back as an image you can look at, e.g. damage or print-defect photos. Other files (PDF, HEIC, video) come back as a note to view them in the Hub.",
+    inputSchema: z.object({
+      message_id: z.string().describe("message_id from inbox_thread."),
+      part_id: z.string().describe("part_id of the attachment, from inbox_thread."),
+    }),
+    annotations: { readOnlyHint: true },
+  }, safe(async ({ message_id, part_id }) => {
+    const { data: m } = await admin.from("ticket_messages").select("gmail_message_id,attachments,tickets(ticket_no,stores(support_email))").eq("id", message_id).maybeSingle();
+    if (!m) return fail("No such message. Use a message_id from inbox_thread.");
+    const meta = ((m.attachments ?? []) as { part_id: string; filename: string; mime: string; size: number }[]).find((a) => a.part_id === part_id);
+    if (!meta) return fail("No attachment with that part_id on this message.");
+    const where = `ticket #${(m as any).tickets.ticket_no} in the Hub inbox`;
+    if (!/^image\/(jpeg|jpg|png|gif|webp)$/.test(meta.mime)) return text(`${meta.filename} is ${meta.mime}, which can't be shown here. Brian can open it on ${where}.`);
+    if (meta.size > 4_500_000) return text(`${meta.filename} is too large to show here (${(meta.size / 1e6).toFixed(1)} MB). Brian can open it on ${where}.`);
+    const a = await getAttachment((m as any).tickets.stores.support_email, m.gmail_message_id, part_id);
+    return { content: [{ type: "text" as const, text: `${a.filename} (${a.mime})` }, { type: "image" as const, data: a.base64, mimeType: a.mime === "image/jpg" ? "image/jpeg" : a.mime }] };
   }));
 
   server.registerTool("inbox_reply", {
-    description: "Send a reply on a ticket's thread from the store's support mailbox, right now. Use ONLY for replies the store's playbook lists as routine (auto_send), or text Brian has explicitly approved. Money, refunds, remakes, discounts, judgment calls and anything in needs_approval go through inbox_stage_reply instead. Write in that store's voice and signature.",
+    description: "Send a reply on a ticket's thread from the store's support mailbox, right now. Use ONLY for replies the store's playbook lists as routine (auto_send), text Brian has explicitly approved, or carrying out Brian's instruction on a for_claude ticket. Otherwise money, refunds, remakes, discounts, judgment calls and anything in needs_approval go through inbox_stage_reply instead. Write in that store's voice and signature. On a for_claude ticket the ticket stays open after the reply; call inbox_done once everything Brian asked for is done.",
     inputSchema: z.object({
       ticket_id: TICKET,
       body: z.string().min(2).describe("Plain-text reply, complete with greeting and signature."),
       reason: z.string().min(3).describe("Which playbook rule makes this routine, e.g. 'order status with tracking'."),
-      actions: z.array(z.record(z.string(), z.any())).optional().describe("Only invoice (catalog or already-quoted prices, per the playbook), tag_order and notify_team, same shape as in inbox_stage_reply (no `when`). They run first; if any fails nothing is emailed. Anything else (refunds, cancels, replacements, shipping changes) must go through inbox_stage_reply."),
+      actions: z.array(z.record(z.string(), z.any())).optional().describe("Same shape as in inbox_stage_reply (no `when`). They run first; if any fails nothing is emailed. Normally only invoice (catalog or already-quoted prices, per the playbook), tag_order and notify_team; anything else (refunds, cancels, replacements, shipping changes) must go through inbox_stage_reply. On a for_claude ticket every action type is allowed, as far as Brian's instruction asks for it."),
     }),
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   }, safe(async ({ ticket_id, body, reason, actions }) => {
@@ -291,16 +317,39 @@ function buildServer(actor: string) {
     if (t.status === "done") return fail("This ticket is already filed as done. If the customer wrote again, run inbox_sync first.");
     let done: string[] = [];
     if (actions?.length) {
-      const bad = actions.find((a: any) => !AUTO_OK.has(a.type) || a.when);
-      if (bad) return fail(`inbox_reply can only run invoice, tag_order and notify_team actions (no options). Use inbox_stage_reply for ${bad.type}.`);
+      const allowed = t.status === "for_claude" ? ALL_ACTIONS : AUTO_OK;
+      const bad = actions.find((a: any) => !allowed.has(a.type) || a.when);
+      if (bad) return fail(bad.when ? "inbox_reply actions can't have a `when` option." : `inbox_reply can only run invoice, tag_order and notify_team actions here. Use inbox_stage_reply for ${bad.type}, unless Brian asked for it on a for_claude ticket.`);
       const prep = prepareActions(actions as any, t.store_key);
       if (prep.error) return fail(`Action rejected: ${prep.error}`);
       await admin.from("tickets").update({ draft_actions: prep.actions }).eq("id", t.id);
-      done = await runTicketActions(t.id, [], `${actor} (${reason})`);
+      done = await runTicketActions(t.id, [], `${actor} (${t.status === "for_claude" ? `Brian's instruction: ${t.instruction}` : reason})`);
     }
     const r = await sendReply(t.id, body, `${actor} (${reason})`);
     await admin.from("tickets").update({ draft_actions: [] }).eq("id", t.id);
-    return text({ sent: true, store: t.stores.name, actions_done: done, ...r, next: "Call inbox_done if nothing else is needed on this thread." });
+    return text({ sent: true, store: t.stores.name, actions_done: done, ...r, next: t.status === "for_claude" ? "Still for_claude. Call inbox_done once everything Brian asked for is done." : "Call inbox_done if nothing else is needed on this thread." });
+  }));
+
+  server.registerTool("inbox_run_actions", {
+    description: "Carry out Brian's instruction on a for_claude ticket WITHOUT emailing the customer (e.g. 'refund $10.50, no reply needed', 'tag the order', 'send graphics the new layout'). Only works on for_claude tickets. Any action type, same shape as inbox_stage_reply (no `when`). Then inbox_reply if a reply is also wanted, and inbox_done when finished.",
+    inputSchema: z.object({
+      ticket_id: TICKET,
+      actions: z.array(z.record(z.string(), z.any())).min(1),
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: true },
+  }, safe(async ({ ticket_id, actions }) => {
+    const t = await loadTicket(ticket_id);
+    if (t.status !== "for_claude") return fail(`#${t.ticket_no} is ${t.status}, not for_claude. Only tickets Brian handed to Claude with an instruction can run actions without approval; otherwise use inbox_stage_reply.`);
+    if (actions.some((a: any) => a.when)) return fail("Actions here can't have a `when` option.");
+    const prep = prepareActions(actions as any, t.store_key);
+    if (prep.error) return fail(`Action rejected: ${prep.error}`);
+    await admin.from("tickets").update({ draft_actions: prep.actions }).eq("id", t.id);
+    try {
+      const done = await runTicketActions(t.id, [], `${actor} (Brian's instruction: ${t.instruction})`);
+      return text({ ticket: `#${t.ticket_no}`, actions_done: done, next: "Reply with inbox_reply if the instruction calls for it, then inbox_done." });
+    } finally {
+      await admin.from("tickets").update({ draft_actions: [] }).eq("id", t.id);
+    }
   }));
 
   server.registerTool("inbox_stage_reply", {
@@ -336,7 +385,7 @@ function buildServer(actor: string) {
   }));
 
   server.registerTool("inbox_flag", {
-    description: "Flag a ticket for Brian with no draft (e.g. track/racing questions for CMP, legal, partnership pitches, anything unsure). Leaves the email unread in the inbox.",
+    description: "Flag a ticket for Brian with no draft (e.g. track/racing questions for CMP, legal, partnership pitches, anything unsure). Leaves the email unread in the inbox. Also how to hand a for_claude ticket back when the instruction can't be carried out as written: say what was done, what wasn't, and why.",
     inputSchema: z.object({
       ticket_id: TICKET,
       note: z.string().min(3).describe("What the customer wants and your recommendation."),
@@ -351,7 +400,7 @@ function buildServer(actor: string) {
   }));
 
   server.registerTool("inbox_done", {
-    description: "File a ticket: adds the Gmail label Completed, archives it out of the inbox and marks it read. Use after replying, or for threads needing no reply (thank-yous, notifications, newsletters, pitches Brian doesn't want). Never on flagged or awaiting-approval threads.",
+    description: "File a ticket: adds the Gmail label Completed, archives it out of the inbox and marks it read. Use after replying, or for threads needing no reply (thank-yous, notifications, newsletters, pitches Brian doesn't want). Never on flagged or awaiting-approval threads. On a for_claude ticket, only once everything Brian's instruction asked for is done.",
     inputSchema: z.object({ ticket_id: TICKET }),
     annotations: { readOnlyHint: false, destructiveHint: false },
   }, safe(async ({ ticket_id }) => {

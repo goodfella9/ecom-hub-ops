@@ -1,17 +1,20 @@
 import type React from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { callFn, supabase } from "./supabase";
+import { callFn, fetchFile, supabase } from "./supabase";
 
 type Ticket = {
   id: string; ticket_no: number; store_key: string; status: string; subject: string; customer_name: string | null; customer_email: string | null;
   category: string | null; order_ref: string | null; snippet: string | null; last_message_at: string; last_from_customer: boolean;
   unread: boolean; in_spam: boolean; draft_actions: HubAction[]; action_log: { id: string; ok: boolean; result: string }[]; draft_body: string | null; draft_reason: string | null; note: string | null; priority: number;
+  instruction: string | null; instruction_by: string | null; instruction_at: string | null;
 };
-type Msg = { id: string; direction: "in" | "out"; from_addr: string; to_addr: string; sent_at: string; body_text: string };
+type Attachment = { part_id: string; filename: string; mime: string; size: number; inline: boolean };
+type Msg = { id: string; direction: "in" | "out"; from_addr: string; to_addr: string; sent_at: string; body_text: string; attachments: Attachment[] | null };
 type Sync = { store_key: string; mailbox: string; last_sync_at: string | null; ok: boolean | null; detail: string | null };
 
 const FILTERS = [
-  { k: "open", label: "OPEN", st: ["new", "needs_you", "awaiting_approval"] },
+  { k: "open", label: "OPEN", st: ["for_claude", "new", "needs_you", "awaiting_approval"] },
+  { k: "for_claude", label: "CLAUDE TO DO", st: ["for_claude"] },
   { k: "awaiting_approval", label: "APPROVE", st: ["awaiting_approval"] },
   { k: "needs_you", label: "NEEDS YOU", st: ["needs_you"] },
   { k: "new", label: "NEW", st: ["new"] },
@@ -22,6 +25,7 @@ const STATUS: Record<string, { label: string; col: string }> = {
   new: { label: "NEW", col: "#38d6ff" },
   needs_you: { label: "NEEDS YOU", col: "#ff5d47" },
   awaiting_approval: { label: "APPROVE", col: "#ffc24a" },
+  for_claude: { label: "CLAUDE TO DO", col: "#b892ff" },
   replied: { label: "REPLIED", col: "#3ee08f" },
   done: { label: "DONE", col: "#7fa9bf" },
 };
@@ -72,10 +76,12 @@ export default function Inbox({ onCount }: { onCount: (n: number) => void }) {
   const cur = useMemo(() => tickets.find((t) => t.id === sel) ?? null, [tickets, sel]);
   useEffect(() => {
     if (!sel) return;
-    supabase.from("ticket_messages").select("id,direction,from_addr,to_addr,sent_at,body_text").eq("ticket_id", sel).order("sent_at").then(({ data }) => setMsgs(data ?? []));
+    supabase.from("ticket_messages").select("id,direction,from_addr,to_addr,sent_at,body_text,attachments").eq("ticket_id", sel).order("sent_at").then(({ data }) => setMsgs(data ?? []));
   }, [sel, cur?.last_message_at]);
   const [chosen, setChosen] = useState<string[]>([]);
   useEffect(() => { setDraft(cur?.draft_body ?? ""); setMsg(""); setChosen([]); }, [cur?.id, cur?.draft_body]);
+  const [instr, setInstr] = useState("");
+  useEffect(() => { setInstr(""); }, [cur?.id]);
   const actions = cur?.draft_actions ?? [];
   // Actions that will run: always-run ones + those tied to an option Brian picked (and whose text is still in the reply).
   // Once every blank is filled, an option-tied action runs if its option text is in the reply (picked or typed).
@@ -89,7 +95,11 @@ export default function Inbox({ onCount }: { onCount: (n: number) => void }) {
     setBusy(action); setMsg("");
     try {
       const r: any = await callFn("inbox", { action, ticket_id: cur.id, ...extra });
-      setMsg(action === "send" ? `${(r.actions_done ?? []).length ? `Done: ${r.actions_done.join(" · ")}. ` : ""}Sent to ${r.to}.` : action === "done" ? "Filed as Completed." : "Saved.");
+      setMsg(action === "send" ? `${(r.actions_done ?? []).length ? `Done: ${r.actions_done.join(" · ")}. ` : ""}Sent to ${r.to}.`
+        : action === "done" ? "Filed as Completed."
+        : action === "instruct" ? "Sent to Claude. The ticket stays open until Claude has done it."
+        : action === "cancel_instruction" ? "Taken back from Claude." : "Saved.");
+      if (action === "instruct") setInstr("");
       await load();
     } catch (e) { setMsg((e as Error).message); }
     setBusy("");
@@ -144,7 +154,7 @@ export default function Inbox({ onCount }: { onCount: (n: number) => void }) {
                 </div>
                 <div className={`t-from ${t.unread ? "unread" : ""}`}>{t.customer_name || t.customer_email}{t.in_spam ? " · SPAM" : ""}{t.category === "sms" ? " · TEXT" : ""}{t.category === "notification" ? " · SYSTEM" : ""}</div>
                 <div className="t-subj">{t.subject}{t.order_ref ? ` · #${t.order_ref}` : ""}</div>
-                <div className="sub t-snip">{t.note || t.draft_reason || t.snippet}</div>
+                <div className="sub t-snip">{t.status === "for_claude" && t.instruction ? `→ Claude: ${t.instruction}` : t.note || t.draft_reason || t.snippet}</div>
               </button>
             );
           })}
@@ -162,9 +172,34 @@ export default function Inbox({ onCount }: { onCount: (n: number) => void }) {
                   <div key={m.id} className={`msg ${m.direction}`}>
                     <div className="sub mono">{m.direction === "in" ? m.from_addr : "You"} · {new Date(m.sent_at).toLocaleString("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</div>
                     <div className="msg-body">{m.body_text}</div>
+                    <Attachments msg={m} />
                   </div>
                 ))}
               </div>
+              {cur.status === "for_claude" ? (
+                <div className="panel" style={{ marginBottom: 12, borderColor: "#b892ff" }}>
+                  <div className="label" style={{ color: "#b892ff" }}>WAITING ON CLAUDE</div>
+                  <div className="msg-body" style={{ marginTop: 4 }}>{cur.instruction}</div>
+                  <div className="sub" style={{ marginTop: 6 }}>
+                    {cur.instruction_by ?? "You"}{cur.instruction_at ? ` · ${new Date(cur.instruction_at).toLocaleString("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}` : ""}.
+                    {" "}Claude does it on the next inbox run (or say "do my Hub tasks" in chat), then files the ticket. If it can't, it comes back as NEEDS YOU with a note.
+                  </div>
+                  <button className="btn" style={{ marginTop: 8 }} disabled={!!busy} onClick={() => act("cancel_instruction")}>TAKE IT BACK</button>
+                </div>
+              ) : (
+                <div className="panel" style={{ marginBottom: 12 }}>
+                  <label className="field"><span className="label">TELL CLAUDE WHAT TO DO</span>
+                    <textarea rows={2} value={instr} onChange={(e) => setInstr(e.target.value)}
+                      placeholder='e.g. "Send a free reprint, same design, and let him know" or "Refund $10.50, no reply needed"' />
+                  </label>
+                  <div className="row" style={{ marginTop: 6 }}>
+                    <button className="btn" style={{ borderColor: "#b892ff", color: "#b892ff" }} disabled={!!busy || instr.trim().length < 3} onClick={() => act("instruct", { instruction: instr })}>
+                      {busy === "instruct" ? "SENDING…" : "SEND TO CLAUDE"}
+                    </button>
+                    <span className="sub">Stays open until Claude has done it. Your instruction is the approval.</span>
+                  </div>
+                </div>
+              )}
               {cur.status !== "done" && (
                 <div className="reply">
                   {cur.draft_reason && <div className="panel warm" style={{ marginBottom: 10 }}><div className="label">WHY THIS NEEDS YOU</div>{cur.draft_reason}</div>}
@@ -278,5 +313,63 @@ function Preview({ draft }: { draft: string }) {
           : <mark key={i} style={{ background: "rgba(255,93,71,0.2)", color: "#ff5d47", fontWeight: 700, borderRadius: 3, padding: "0 2px" }}>{p.blank}</mark>)}
       </div>
     </div>
+  );
+}
+
+// ---------- Files customers attach ----------
+// Images show as thumbnails (click for full size); other files are download links. Bytes come from Gmail on demand.
+const isImg = (a: Attachment) => /^image\/(png|jpe?g|gif|webp)$/.test(a.mime);
+const kb = (n: number) => (n > 1e6 ? `${(n / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1e3))} KB`);
+
+function Attachments({ msg }: { msg: Msg }) {
+  // Skip tiny inline images (email signature logos, tracking pixels).
+  const files = (msg.attachments ?? []).filter((a) => !(a.inline && isImg(a) && a.size < 15_000));
+  if (!files.length) return null;
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 8 }} aria-label="Attachments">
+      {files.map((a) => <AttachmentItem key={a.part_id} msgId={msg.id} a={a} />)}
+    </div>
+  );
+}
+
+function AttachmentItem({ msgId, a }: { msgId: string; a: Attachment }) {
+  const [url, setUrl] = useState<string | null>(null);
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(async () => {
+    const blob = await fetchFile("attachment", { message_id: msgId, part_id: a.part_id });
+    return URL.createObjectURL(blob);
+  }, [msgId, a.part_id]);
+  useEffect(() => {
+    if (!isImg(a)) return;
+    let made: string | null = null, live = true;
+    load().then((u) => { made = u; if (live) setUrl(u); else URL.revokeObjectURL(u); }).catch((e) => live && setErr((e as Error).message));
+    return () => { live = false; if (made) URL.revokeObjectURL(made); };
+  }, [a, load]);
+  const open = async () => {
+    if (url) { window.open(url, "_blank", "noopener"); return; }
+    setBusy(true); setErr("");
+    try {
+      const u = await load();
+      const link = document.createElement("a");
+      link.href = u; link.download = a.filename; link.click();
+      setTimeout(() => URL.revokeObjectURL(u), 60_000);
+    } catch (e) { setErr((e as Error).message); }
+    setBusy(false);
+  };
+  const box: React.CSSProperties = { border: "1px solid var(--line)", borderRadius: 6, padding: 4, background: "transparent", color: "inherit", font: "inherit", cursor: "pointer", textAlign: "left" };
+  if (isImg(a)) {
+    return (
+      <button style={box} onClick={open} title={`${a.filename} · ${kb(a.size)} · click for full size`}>
+        {url ? <img src={url} alt={a.filename} style={{ display: "block", width: 140, height: 105, objectFit: "cover", borderRadius: 4 }} />
+          : <div className="sub" style={{ width: 140, height: 105, display: "grid", placeItems: "center", textAlign: "center" }}>{err ? `Couldn't load: ${err}` : "Loading photo…"}</div>}
+        <div className="sub mono" style={{ maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginTop: 4 }}>{a.filename}</div>
+      </button>
+    );
+  }
+  return (
+    <button style={{ ...box, padding: "8px 10px" }} onClick={open} disabled={busy} title="Download">
+      📎 {a.filename} <span className="sub">· {kb(a.size)}{busy ? " · downloading…" : ""}{err ? ` · ${err}` : ""}</span>
+    </button>
   );
 }

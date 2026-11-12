@@ -1,4 +1,5 @@
-// Hub inbox actions for a signed-in admin: send (approve) a reply, save/discard a draft, file as done, reopen.
+// Hub inbox actions for a signed-in admin: send (approve) a reply, save/discard a draft, file as done, reopen,
+// hand a ticket to Claude with an instruction (instruct) or take it back (cancel_instruction).
 import { admin, CORS, json, requireAdmin } from "../_shared/hub.ts";
 import { findBlanks, markDone, sendReply } from "../_shared/gmail.ts";
 import { runTicketActions } from "../_shared/actions.ts";
@@ -9,7 +10,7 @@ Deno.serve(async (req) => {
   const who = await requireAdmin(req);
   if (who instanceof Response) return who;
   const actor = `hub:${who.email}`;
-  const { action, ticket_id, body, note, actions } = await req.json().catch(() => ({}));
+  const { action, ticket_id, body, note, actions, instruction } = await req.json().catch(() => ({}));
   if (!ticket_id) return json({ error: "ticket_id required" }, 400);
   try {
     switch (action) {
@@ -38,6 +39,21 @@ Deno.serve(async (req) => {
         return json({ ok: true });
       case "reopen":
         await admin.from("tickets").update({ status: "needs_you", updated_at: new Date().toISOString() }).eq("id", ticket_id);
+        return json({ ok: true });
+      // Brian hands the ticket to Claude with a written instruction. It stays open (and in Gmail) until Claude
+      // has done what it says and files it, or hands it back as needs_you.
+      case "instruct": {
+        const text = String(instruction ?? "").trim();
+        if (text.length < 3) return json({ error: "Write what you want Claude to do." }, 400);
+        const { data: t } = await admin.from("tickets").select("store_key,ticket_no").eq("id", ticket_id).maybeSingle();
+        if (!t) return json({ error: "No such ticket." }, 404);
+        const now = new Date().toISOString();
+        await admin.from("tickets").update({ status: "for_claude", instruction: text.slice(0, 4000), instruction_by: who.email, instruction_at: now, updated_at: now }).eq("id", ticket_id);
+        await admin.from("audit_log").insert({ store_key: t.store_key, actor, action: "ticket_instruct", summary: `#${t.ticket_no}: ${text.slice(0, 200)}`, status: "queued", ref: ticket_id });
+        return json({ ok: true });
+      }
+      case "cancel_instruction":
+        await admin.from("tickets").update({ status: "needs_you", updated_at: new Date().toISOString() }).eq("id", ticket_id).eq("status", "for_claude");
         return json({ ok: true });
       default:
         return json({ error: "unknown action" }, 400);

@@ -2,7 +2,7 @@
 // Runs every 5 minutes from pg_cron (header x-hub-cron must match hub_secrets.cron), or on demand by a signed-in admin.
 // GET ?whoami=1 returns only the service account's public client ID (needed for domain-wide delegation).
 import { admin, CORS, json, requireAdmin } from "../_shared/hub.ts";
-import { findBlanks, markDone, saIdentity, sendReply, syncStore } from "../_shared/gmail.ts";
+import { findBlanks, markDone, saIdentity, sendReply, syncStore, syncThread } from "../_shared/gmail.ts";
 import { runTicketActions } from "../_shared/actions.ts";
 
 Deno.serve(async (req) => {
@@ -62,6 +62,19 @@ Deno.serve(async (req) => {
       filed++;
     }
     return json({ store: only, filed, left });
+  }
+  // One-off after adding attachment support: re-read every open ticket's thread so older messages get their attachment lists.
+  if (url.searchParams.get("backfill") && only) {
+    const t0 = Date.now();
+    const { data: s } = await admin.from("stores").select("support_email").eq("key", only).maybeSingle();
+    const { data: open } = await admin.from("tickets").select("gmail_thread_id,in_spam").eq("store_key", only).neq("status", "done").limit(400);
+    let synced = 0, left = 0;
+    for (const t of open ?? []) {
+      if (Date.now() - t0 > 120_000) { left++; continue; }
+      try { await syncThread(only, s!.support_email, t.gmail_thread_id, t.in_spam); synced++; }
+      catch (e) { if (!/HTTP 404/.test((e as Error).message)) throw e; }
+    }
+    return json({ store: only, synced, left });
   }
   let q = admin.from("stores").select("key,support_email").eq("active", true).not("support_email", "is", null);
   if (only) q = q.eq("key", only);

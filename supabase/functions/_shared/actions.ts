@@ -252,8 +252,11 @@ export async function runTicketActions(ticketId: string, chosen: string[], actor
 
 export function prepareActions(actions: Action[] | undefined, store: string): { actions: Action[]; error: string | null } {
   const out: Action[] = [];
+  // Ids must be unique across the ticket's whole history: runTicketActions skips any id already logged as done,
+  // so reusing "a1" on a second batch silently skipped that action.
+  const batch = Date.now().toString(36);
   for (const [i, a] of (actions ?? []).entries()) {
-    const withId = { ...a, id: a.id || `a${i + 1}` };
+    const withId = { ...a, id: a.id || `${batch}-${i + 1}` };
     const err = validate(withId);
     if (err) return { actions: [], error: err };
     out.push({ ...withId, summary: describe(withId) });
@@ -264,3 +267,6 @@ export function prepareActions(actions: Action[] | undefined, store: string): { 
 
 // Actions a scheduled run may perform without Brian (inbox_reply): billing at catalog/quoted prices and internal notices.
 export const AUTO_OK = new Set(["invoice", "tag_order", "notify_team"]);
+// On a ticket Brian handed to Claude with a written instruction (status for_claude), that instruction is the approval,
+// so every action type is allowed there.
+export const ALL_ACTIONS = new Set(["invoice", "cancel_refund", "refund_items", "replacement", "tag_order", "notify_team", "upgrade_shipping"]);

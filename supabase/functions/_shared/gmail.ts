@@ -82,12 +82,51 @@ export async function gmail(mailbox: string, path: string, init: RequestInit = {
 }
 
 // ---------- parsing ----------
-type Part = { mimeType?: string; body?: { data?: string }; parts?: Part[]; headers?: { name: string; value: string }[] };
+type Part = {
+  partId?: string; mimeType?: string; filename?: string;
+  body?: { data?: string; attachmentId?: string; size?: number };
+  parts?: Part[]; headers?: { name: string; value: string }[];
+};
 const header = (p: Part, name: string) => p.headers?.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value ?? "";
 function findBody(p: Part, mime: string): string | null {
-  if (p.mimeType === mime && p.body?.data) return fromB64url(p.body.data);
+  // Attachments that happen to be text/plain or text/html (a .txt or .html file) are not the message body.
+  if (p.mimeType === mime && p.body?.data && !p.filename) return fromB64url(p.body.data);
   for (const c of p.parts ?? []) { const r = findBody(c, mime); if (r) return r; }
   return null;
+}
+
+// Files attached to an email (photos, PDFs...). Only metadata is stored; the bytes stay in Gmail and are
+// fetched on demand by part_id, which is stable for a message (Gmail's attachmentId is not).
+export type Attachment = { part_id: string; filename: string; mime: string; size: number; inline: boolean };
+function findAttachments(p: Part, out: Attachment[] = []): Attachment[] {
+  if (p.filename && p.partId && (p.body?.attachmentId || p.body?.data)) {
+    const disp = header(p, "Content-Disposition").toLowerCase();
+    out.push({
+      part_id: p.partId, filename: p.filename, mime: (p.mimeType ?? "application/octet-stream").toLowerCase(),
+      size: Number(p.body?.size ?? 0), inline: disp.startsWith("inline") || !!header(p, "Content-ID"),
+    });
+  }
+  for (const c of p.parts ?? []) findAttachments(c, out);
+  return out;
+}
+function findPart(p: Part, partId: string): Part | null {
+  if (p.partId === partId) return p;
+  for (const c of p.parts ?? []) { const r = findPart(c, partId); if (r) return r; }
+  return null;
+}
+
+// Download one attachment from Gmail. Returns base64 (standard, not url-safe) so it can go straight into
+// an MCP image block or be decoded to bytes.
+export async function getAttachment(mailbox: string, gmailMessageId: string, partId: string) {
+  const m = await gmail(mailbox, `/messages/${gmailMessageId}?format=full`);
+  const part = findPart(m.payload ?? {}, partId);
+  if (!part || !part.filename) throw new MailError("That attachment isn't on this email any more.");
+  const data = part.body?.attachmentId
+    ? (await gmail(mailbox, `/messages/${gmailMessageId}/attachments/${part.body.attachmentId}`)).data as string
+    : part.body?.data ?? "";
+  if (!data) throw new MailError("Gmail returned an empty attachment.");
+  const b64 = data.replace(/-/g, "+").replace(/_/g, "/");
+  return { filename: part.filename, mime: (part.mimeType ?? "application/octet-stream").toLowerCase(), base64: b64 + "=".repeat((4 - (b64.length % 4)) % 4) };
 }
 const stripHtml = (h: string) => h.replace(/<(style|script)[\s\S]*?<\/\1>/gi, "").replace(/<br\s*\/?>/gi, "\n").replace(/<\/(p|div|tr|li)>/gi, "\n").replace(/<[^>]+>/g, "")
   .replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/\n{3,}/g, "\n\n").trim();
@@ -108,6 +147,7 @@ export function parseMessage(m: any) {
     sentAt: new Date(Number(m.internalDate)).toISOString(),
     body: stripQuoted(raw).slice(0, 20000),
     fullBody: raw,
+    attachments: findAttachments(p),
   };
 }
 
@@ -160,9 +200,10 @@ export async function syncThread(store_key: string, mailbox: string, threadId: s
   const { data: existing } = await admin.from("tickets").select("id,status,last_message_at").eq("store_key", store_key).eq("gmail_thread_id", threadId).maybeSingle();
   let status = existing?.status ?? "new";
   const newActivity = !existing || new Date(last.sentAt) > new Date(existing.last_message_at ?? 0);
+  // for_claude = Brian left Claude an instruction; it stays that way until Claude finishes (inbox_done) or hands it back.
   if (newActivity && lastFromCustomer && (status === "done" || status === "replied")) status = "new";
-  if (!lastFromCustomer && status !== "done" && status !== "awaiting_approval") status = "replied";
-  if (!inInbox && !inSpam && status !== "done" && !lastFromCustomer) status = "done";
+  if (!lastFromCustomer && status !== "done" && status !== "awaiting_approval" && status !== "for_claude") status = "replied";
+  if (!inInbox && !inSpam && status !== "done" && status !== "for_claude" && !lastFromCustomer) status = "done";
 
   const notice = cust.via === "email" && isNotification(cust.email);
   const row = {
@@ -176,7 +217,7 @@ export async function syncThread(store_key: string, mailbox: string, threadId: s
   if (error) throw new MailError(`Hub database error: ${error.message}`);
   await admin.from("ticket_messages").upsert(msgs.map((m: any) => ({
     ticket_id: tk.id, gmail_message_id: m.id, rfc_message_id: m.rfcId, direction: mine(m) ? "out" : "in",
-    from_addr: m.from, to_addr: m.to, subject: m.subject, sent_at: m.sentAt, body_text: m.body,
+    from_addr: m.from, to_addr: m.to, subject: m.subject, sent_at: m.sentAt, body_text: m.body, attachments: m.attachments,
   })), { onConflict: "gmail_message_id" });
   return tk.id as string;
 }
@@ -239,7 +280,8 @@ export async function sendReply(ticketId: string, body: string, actor: string) {
     "MIME-Version: 1.0", "Content-Type: text/plain; charset=UTF-8", "Content-Transfer-Encoding: 8bit", "", body,
   ].join("\r\n");
   const sent = await gmail(mailbox, "/messages/send", { method: "POST", body: JSON.stringify({ raw: b64url(mime), threadId: t.gmail_thread_id }) });
-  await admin.from("tickets").update({ status: "replied", last_from_customer: false, unread: false, draft_body: null, draft_reason: null, updated_at: new Date().toISOString() }).eq("id", ticketId);
+  // A ticket Brian handed to Claude stays for_claude after a reply: Claude files it only once everything asked is done.
+  await admin.from("tickets").update({ status: t.status === "for_claude" ? "for_claude" : "replied", last_from_customer: false, unread: false, draft_body: null, draft_reason: null, updated_at: new Date().toISOString() }).eq("id", ticketId);
   await gmail(mailbox, `/threads/${t.gmail_thread_id}/modify`, { method: "POST", body: JSON.stringify({ removeLabelIds: ["UNREAD"] }) }).catch(() => null);
   await admin.from("audit_log").insert({ store_key: t.store_key, actor, action: "email_reply", summary: `Replied to ${to}: ${subject}`, status: "sent", ref: ticketId });
   await syncThread(t.store_key, mailbox, t.gmail_thread_id).catch(() => null);
