@@ -63,18 +63,23 @@ Deno.serve(async (req) => {
     }
     return json({ store: only, filed, left });
   }
-  // One-off after adding attachment support: re-read every open ticket's thread so older messages get their attachment lists.
+  // One-off after adding attachment support: re-read tickets' threads so older messages get their attachment lists.
+  // ?backfill=1&store=x (open tickets) or &all=1 (filed ones too). Resumable: pass &after=<next_after> until done.
   if (url.searchParams.get("backfill") && only) {
     const t0 = Date.now();
+    const after = Number(url.searchParams.get("after") ?? 0);
     const { data: s } = await admin.from("stores").select("support_email").eq("key", only).maybeSingle();
-    const { data: open } = await admin.from("tickets").select("gmail_thread_id,in_spam").eq("store_key", only).neq("status", "done").limit(400);
-    let synced = 0, left = 0;
-    for (const t of open ?? []) {
-      if (Date.now() - t0 > 120_000) { left++; continue; }
+    let tq = admin.from("tickets").select("ticket_no,gmail_thread_id,in_spam").eq("store_key", only).gt("ticket_no", after).order("ticket_no").limit(500);
+    if (!url.searchParams.get("all")) tq = tq.neq("status", "done");
+    const { data: list } = await tq;
+    let synced = 0, last = after;
+    for (const t of list ?? []) {
+      if (Date.now() - t0 > 110_000) return json({ store: only, synced, done: false, next_after: last });
       try { await syncThread(only, s!.support_email, t.gmail_thread_id, t.in_spam); synced++; }
       catch (e) { if (!/HTTP 404/.test((e as Error).message)) throw e; }
+      last = t.ticket_no;
     }
-    return json({ store: only, synced, left });
+    return json({ store: only, synced, done: (list ?? []).length < 500, next_after: last });
   }
   let q = admin.from("stores").select("key,support_email").eq("active", true).not("support_email", "is", null);
   if (only) q = q.eq("key", only);
